@@ -9,7 +9,9 @@ package claude
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -42,10 +44,138 @@ type Params struct {
 
 	// Signature caching support
 	CurrentThinkingText strings.Builder // Accumulates thinking text for signature caching
+
+	// XML tool call parsing support (Claude via Antigravity returns tool calls as XML)
+	XMLToolBuffer        strings.Builder // Buffer for accumulating XML tool call text
+	InXMLToolBlock       bool            // True when inside a <function_calls> block
+	PendingTextBeforeXML string          // Text content before the XML tool call started
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
 var toolUseIDCounter uint64
+
+// XML tool call patterns used by Claude models through Antigravity
+// Claude can use multiple formats:
+// 1. <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+// 2. <function_calls><invoke name="...">...</invoke></function_calls>
+var (
+	// Pattern 1: <tool_call> with JSON content
+	xmlToolCallStartRe = regexp.MustCompile(`<tool_call>`)
+	xmlToolCallEndRe   = regexp.MustCompile(`</tool_call>`)
+	xmlToolCallRe      = regexp.MustCompile(`<tool_call>\s*(\{[\s\S]*?\})\s*</tool_call>`)
+
+	// Pattern 2: <function_calls> with <invoke> blocks (legacy/alternative format)
+	xmlFunctionCallsStartRe = regexp.MustCompile(`<(?:antml:)?function_calls>`)
+	xmlFunctionCallsEndRe   = regexp.MustCompile(`</(?:antml:)?function_calls>`)
+	xmlInvokeRe             = regexp.MustCompile(`<(?:antml:)?invoke\s+name="([^"]+)"[^>]*>`)
+	xmlInvokeEndRe          = regexp.MustCompile(`</(?:antml:)?invoke>`)
+	xmlParameterRe          = regexp.MustCompile(`<(?:antml:)?parameter\s+name="([^"]+)"[^>]*>([\s\S]*?)</(?:antml:)?parameter>`)
+)
+
+// containsXMLToolCallStart checks if text contains the start of an XML tool call block
+func containsXMLToolCallStart(text string) bool {
+	return xmlToolCallStartRe.MatchString(text) || xmlFunctionCallsStartRe.MatchString(text)
+}
+
+// containsXMLToolCallEnd checks if text contains the end of an XML tool call block
+func containsXMLToolCallEnd(text string) bool {
+	return xmlToolCallEndRe.MatchString(text) || xmlFunctionCallsEndRe.MatchString(text)
+}
+
+// parseXMLToolCalls extracts tool calls from accumulated XML text
+func parseXMLToolCalls(xmlText string) []parsedToolCall {
+	var calls []parsedToolCall
+
+	// Try Pattern 1: <tool_call>{JSON}</tool_call>
+	toolCallMatches := xmlToolCallRe.FindAllStringSubmatch(xmlText, -1)
+	for _, match := range toolCallMatches {
+		if len(match) < 2 {
+			continue
+		}
+		jsonContent := match[1]
+
+		// Parse the JSON to extract name and arguments
+		var toolCallJSON struct {
+			Name      string                 `json:"name"`
+			Arguments map[string]interface{} `json:"arguments"`
+		}
+		if err := json.Unmarshal([]byte(jsonContent), &toolCallJSON); err != nil {
+			continue
+		}
+
+		// Convert arguments to string map for compatibility
+		params := make(map[string]string)
+		for k, v := range toolCallJSON.Arguments {
+			switch val := v.(type) {
+			case string:
+				params[k] = val
+			case bool:
+				if val {
+					params[k] = "true"
+				} else {
+					params[k] = "false"
+				}
+			case float64:
+				params[k] = fmt.Sprintf("%v", val)
+			default:
+				// For complex types, marshal back to JSON
+				if jsonBytes, err := json.Marshal(val); err == nil {
+					params[k] = string(jsonBytes)
+				}
+			}
+		}
+
+		calls = append(calls, parsedToolCall{
+			Name:      toolCallJSON.Name,
+			Params:    params,
+			RawParams: toolCallJSON.Arguments,
+		})
+	}
+
+	// If Pattern 1 found results, return them
+	if len(calls) > 0 {
+		return calls
+	}
+
+	// Try Pattern 2: <function_calls><invoke>...</invoke></function_calls>
+	invokeMatches := xmlInvokeRe.FindAllStringSubmatchIndex(xmlText, -1)
+	for _, match := range invokeMatches {
+		if len(match) < 4 {
+			continue
+		}
+		toolName := xmlText[match[2]:match[3]]
+
+		// Find the end of this invoke block
+		invokeStart := match[0]
+		invokeEndLoc := xmlInvokeEndRe.FindStringIndex(xmlText[invokeStart:])
+		if invokeEndLoc == nil {
+			continue
+		}
+		invokeBlock := xmlText[invokeStart : invokeStart+invokeEndLoc[1]]
+
+		// Parse parameters
+		params := make(map[string]string)
+		paramMatches := xmlParameterRe.FindAllStringSubmatch(invokeBlock, -1)
+		for _, pm := range paramMatches {
+			if len(pm) >= 3 {
+				params[pm[1]] = pm[2]
+			}
+		}
+
+		calls = append(calls, parsedToolCall{
+			Name:   toolName,
+			Params: params,
+		})
+	}
+
+	return calls
+}
+
+type parsedToolCall struct {
+	Name      string
+	Params    map[string]string
+	RawParams map[string]interface{} // Original parsed arguments for JSON format
+}
 
 // ConvertAntigravityResponseToClaude performs sophisticated streaming response format conversion.
 // This function implements a complex state machine that translates backend client responses
@@ -183,12 +313,104 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 					}
 				} else {
 					finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason")
-					if partTextResult.String() != "" || !finishReasonResult.Exists() {
+					textContent := partTextResult.String()
+
+					// Check for XML tool call patterns (Claude via Antigravity returns tool calls as XML)
+					if containsXMLToolCallStart(textContent) || params.InXMLToolBlock {
+						// Start or continue accumulating XML tool call
+						if containsXMLToolCallStart(textContent) && !params.InXMLToolBlock {
+							// Found start of XML tool call block
+							params.InXMLToolBlock = true
+							// Extract any text before the XML and save it
+							startIdx := xmlFunctionCallsStartRe.FindStringIndex(textContent)
+							if startIdx != nil && startIdx[0] > 0 {
+								params.PendingTextBeforeXML = textContent[:startIdx[0]]
+							}
+						}
+						params.XMLToolBuffer.WriteString(textContent)
+
+						// Check if we have a complete tool call block
+						if containsXMLToolCallEnd(params.XMLToolBuffer.String()) {
+							// Parse the accumulated XML and emit tool_use events
+							xmlText := params.XMLToolBuffer.String()
+							toolCalls := parseXMLToolCalls(xmlText)
+
+							// First, emit any pending text before the XML
+							if params.PendingTextBeforeXML != "" {
+								if params.ResponseType != 0 && params.ResponseType != 1 {
+									if params.ResponseType != 0 {
+										output = output + "event: content_block_stop\n"
+										output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+										output = output + "\n\n\n"
+										params.ResponseIndex++
+									}
+								}
+								if params.ResponseType != 1 {
+									output = output + "event: content_block_start\n"
+									output = output + fmt.Sprintf(`data: {"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex)
+									output = output + "\n\n\n"
+									params.ResponseType = 1
+								}
+								output = output + "event: content_block_delta\n"
+								data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex), "delta.text", params.PendingTextBeforeXML)
+								output = output + fmt.Sprintf("data: %s\n\n\n", data)
+								params.HasContent = true
+								params.PendingTextBeforeXML = ""
+							}
+
+							// Now emit tool_use events for each parsed tool call
+							for _, tc := range toolCalls {
+								// Close any existing content block
+								if params.ResponseType != 0 {
+									output = output + "event: content_block_stop\n"
+									output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+									output = output + "\n\n\n"
+									params.ResponseIndex++
+								}
+
+								// Start new tool_use block
+								params.HasToolUse = true
+								output = output + "event: content_block_start\n"
+								toolID := fmt.Sprintf("%s-%d-%d", tc.Name, time.Now().UnixNano(), atomic.AddUint64(&toolUseIDCounter, 1))
+								data := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`, params.ResponseIndex)
+								data, _ = sjson.Set(data, "content_block.id", toolID)
+								data, _ = sjson.Set(data, "content_block.name", tc.Name)
+								output = output + fmt.Sprintf("data: %s\n\n\n", data)
+
+								// Emit input_json_delta with the parameters
+								if tc.RawParams != nil && len(tc.RawParams) > 0 {
+									// Use RawParams for proper JSON serialization (preserves types)
+									if jsonBytes, err := json.Marshal(tc.RawParams); err == nil {
+										output = output + "event: content_block_delta\n"
+										data, _ = sjson.SetRaw(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, params.ResponseIndex), "delta.partial_json", string(jsonBytes))
+										output = output + fmt.Sprintf("data: %s\n\n\n", data)
+									}
+								} else if len(tc.Params) > 0 {
+									// Fallback to string params
+									paramsJSON := "{}"
+									for k, v := range tc.Params {
+										paramsJSON, _ = sjson.Set(paramsJSON, k, v)
+									}
+									output = output + "event: content_block_delta\n"
+									data, _ = sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, params.ResponseIndex), "delta.partial_json", paramsJSON)
+									output = output + fmt.Sprintf("data: %s\n\n\n", data)
+								}
+
+								params.ResponseType = 3 // function call state
+								params.HasContent = true
+							}
+
+							// Reset XML tool call state
+							params.XMLToolBuffer.Reset()
+							params.InXMLToolBlock = false
+						}
+						// Don't forward XML as text - we're accumulating it
+					} else if textContent != "" || !finishReasonResult.Exists() {
 						// Process regular text content (user-visible output)
 						// Continue existing text block if already in content state
 						if params.ResponseType == 1 {
 							output = output + "event: content_block_delta\n"
-							data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex), "delta.text", partTextResult.String())
+							data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex), "delta.text", textContent)
 							output = output + fmt.Sprintf("data: %s\n\n\n", data)
 							params.HasContent = true
 						} else {
@@ -205,13 +427,13 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 								output = output + "\n\n\n"
 								params.ResponseIndex++
 							}
-							if partTextResult.String() != "" {
+							if textContent != "" {
 								// Start a new text content block
 								output = output + "event: content_block_start\n"
 								output = output + fmt.Sprintf(`data: {"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex)
 								output = output + "\n\n\n"
 								output = output + "event: content_block_delta\n"
-								data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex), "delta.text", partTextResult.String())
+								data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex), "delta.text", textContent)
 								output = output + fmt.Sprintf("data: %s\n\n\n", data)
 								params.ResponseType = 1 // Set state to content
 								params.HasContent = true

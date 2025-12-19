@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -22,12 +23,62 @@ import (
 
 // convertCliResponseToOpenAIChatParams holds parameters for response conversion.
 type convertCliResponseToOpenAIChatParams struct {
-	UnixTimestamp int64
-	FunctionIndex int
+	UnixTimestamp  int64
+	FunctionIndex  int
+	XMLToolBuffer  strings.Builder // Accumulates XML tool call text
+	InXMLToolBlock bool            // True when inside a <tool_call> block
+	TextBeforeXML  string          // Text before the XML started
 }
 
 // functionCallIDCounter provides a process-wide unique counter for function call identifiers.
 var functionCallIDCounter uint64
+
+// XML tool call pattern: <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+var xmlToolCallRe = regexp.MustCompile(`<tool_call>\s*(\{[\s\S]*?\})\s*</tool_call>`)
+
+// parseXMLToolCallsFromText parses <tool_call>{JSON}</tool_call> patterns from text
+// Returns: parsed tool calls, remaining text (without the tool call XML)
+func parseXMLToolCallsFromText(text string) ([]parsedXMLToolCall, string) {
+	var calls []parsedXMLToolCall
+
+	matches := xmlToolCallRe.FindAllStringSubmatch(text, -1)
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		jsonContent := match[1]
+
+		var toolCall struct {
+			Name      string                 `json:"name"`
+			Arguments map[string]interface{} `json:"arguments"`
+		}
+		if err := json.Unmarshal([]byte(jsonContent), &toolCall); err != nil {
+			continue
+		}
+
+		// Marshal arguments back to JSON string
+		argsJSON, err := json.Marshal(toolCall.Arguments)
+		if err != nil {
+			argsJSON = []byte("{}")
+		}
+
+		calls = append(calls, parsedXMLToolCall{
+			Name:      toolCall.Name,
+			Arguments: string(argsJSON),
+		})
+	}
+
+	// Remove tool call XML from text
+	remainingText := xmlToolCallRe.ReplaceAllString(text, "")
+	remainingText = strings.TrimSpace(remainingText)
+
+	return calls, remainingText
+}
+
+type parsedXMLToolCall struct {
+	Name      string
+	Arguments string
+}
 
 // ConvertAntigravityResponseToOpenAI translates a single chunk of a streaming response from the
 // Gemini CLI API format to the OpenAI Chat Completions streaming format.
@@ -113,6 +164,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	// Process the main content part of the response.
 	partsResult := gjson.GetBytes(rawJSON, "response.candidates.0.content.parts")
 	hasFunctionCall := false
+	hasContent := false // Track if we have meaningful content to emit
 	if partsResult.IsArray() {
 		partResults := partsResult.Array()
 		for i := 0; i < len(partResults); i++ {
@@ -138,17 +190,119 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 
 			if partTextResult.Exists() {
 				textContent := partTextResult.String()
+				params := (*param).(*convertCliResponseToOpenAIChatParams)
 
-				// Handle text content, distinguishing between regular content and reasoning/thoughts.
-				if partResult.Get("thought").Bool() {
-					template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", textContent)
+				// ALWAYS accumulate text first to handle fragmented tool_call tags
+				// Text chunks before <tool_call> must not be emitted until we know there's no tool call
+				params.XMLToolBuffer.WriteString(textContent)
+				accumulated := params.XMLToolBuffer.String()
+
+				// Check if we might be in a tool call block
+				containsToolStart := strings.Contains(accumulated, "<tool_call>")
+				containsToolEnd := strings.Contains(accumulated, "</tool_call>")
+				mightHavePartialTag := strings.Contains(accumulated, "<tool") && !containsToolStart
+
+				if containsToolStart && containsToolEnd {
+					// We have complete tool call(s) - process them
+					params.InXMLToolBlock = true
+
+					// Check if we see tool_call start but haven't marked it yet
+					if !params.InXMLToolBlock && strings.Contains(accumulated, "<tool_call>") {
+						params.InXMLToolBlock = true
+						// Extract text before the first <tool_call>
+						idx := strings.Index(accumulated, "<tool_call>")
+						if idx > 0 {
+							params.TextBeforeXML = accumulated[:idx]
+						}
+					}
+
+					// Check if we have complete tool call blocks to parse
+					if params.InXMLToolBlock && strings.Contains(accumulated, "</tool_call>") {
+						// Debug: show what we're about to parse
+						fmt.Printf("[ANTIGRAVITY-OPENAI] About to parse buffer (len=%d): %s\n", len(accumulated), accumulated[:min(200, len(accumulated))])
+
+						// Try to parse all complete tool calls
+						parsedCalls, remainingText := parseXMLToolCallsFromText(accumulated)
+
+						fmt.Printf("[ANTIGRAVITY-OPENAI] ACCUMULATED: Parsed %d tool calls from buffer\n", len(parsedCalls))
+						fmt.Printf("[ANTIGRAVITY-OPENAI] Remaining text after parse: %q\n", remainingText)
+
+						if len(parsedCalls) > 0 {
+							hasContent = true
+							// First emit any text that came before tool calls
+							if params.TextBeforeXML != "" {
+								if partResult.Get("thought").Bool() {
+									template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", params.TextBeforeXML)
+								} else {
+									template, _ = sjson.Set(template, "choices.0.delta.content", params.TextBeforeXML)
+								}
+								params.TextBeforeXML = ""
+							}
+
+							// Emit parsed tool calls
+							for _, tc := range parsedCalls {
+								fmt.Printf("[ANTIGRAVITY-OPENAI] Emitting tool call: name=%s, args=%s\n", tc.Name, tc.Arguments)
+								hasFunctionCall = true
+								toolCallsResult := gjson.Get(template, "choices.0.delta.tool_calls")
+								functionCallIndex := params.FunctionIndex
+								params.FunctionIndex++
+								if toolCallsResult.Exists() && toolCallsResult.IsArray() {
+									functionCallIndex = len(toolCallsResult.Array())
+								} else {
+									template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls", `[]`)
+								}
+
+								functionCallTemplate := `{"id": "","index": 0,"type": "function","function": {"name": "","arguments": ""}}`
+								functionCallTemplate, _ = sjson.Set(functionCallTemplate, "id", fmt.Sprintf("%s-%d-%d", tc.Name, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)))
+								functionCallTemplate, _ = sjson.Set(functionCallTemplate, "index", functionCallIndex)
+								functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.name", tc.Name)
+								// Use SetRaw since tc.Arguments is already valid JSON
+								functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.arguments", tc.Arguments)
+								template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
+								template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls.-1", functionCallTemplate)
+							}
+
+							// Reset buffer and update with remaining (might have partial next tool_call)
+							params.XMLToolBuffer.Reset()
+							if remainingText != "" {
+								// Check if remaining text has another partial tool_call
+								if strings.Contains(remainingText, "<tool") {
+									params.XMLToolBuffer.WriteString(remainingText)
+								} else {
+									// Remaining is regular text, clear the block tracking
+									params.InXMLToolBlock = false
+									if strings.TrimSpace(remainingText) != "" {
+										if partResult.Get("thought").Bool() {
+											template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", remainingText)
+										} else {
+											template, _ = sjson.Set(template, "choices.0.delta.content", remainingText)
+										}
+									}
+								}
+							} else {
+								params.InXMLToolBlock = false
+							}
+						}
+					}
+					// While accumulating, don't emit anything yet
+				} else if mightHavePartialTag || containsToolStart {
+					// Still accumulating, waiting for complete tool call or end of partial tag
+					// Don't emit anything yet
 				} else {
-					template, _ = sjson.Set(template, "choices.0.delta.content", textContent)
+					// No tool call detected - safe to emit accumulated buffer
+					hasContent = true
+					params.XMLToolBuffer.Reset()
+					if partResult.Get("thought").Bool() {
+						template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", accumulated)
+					} else {
+						template, _ = sjson.Set(template, "choices.0.delta.content", accumulated)
+					}
 				}
 				template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
 			} else if functionCallResult.Exists() {
 				// Handle function call content.
 				hasFunctionCall = true
+				hasContent = true
 				toolCallsResult := gjson.Get(template, "choices.0.delta.tool_calls")
 				functionCallIndex := (*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex
 				(*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex++
@@ -193,6 +347,11 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 				template, _ = sjson.SetRaw(template, "choices.0.delta.images.-1", imagePayload)
 			}
 		}
+	}
+
+	// Only emit if we have meaningful content
+	if !hasContent && !hasFunctionCall {
+		return []string{}
 	}
 
 	if hasFunctionCall {

@@ -53,6 +53,15 @@ func init() {
 func main() {
 	fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
 
+	// Log a clear message when running a local dev build (not the brew-installed version)
+	if buildinfo.Version == "dev" {
+		fmt.Println("")
+		fmt.Println("==========================================")
+		fmt.Println("🔧 LOCAL DEV BUILD - NOT PRODUCTION")
+		fmt.Println("==========================================")
+		fmt.Println("")
+	}
+
 	// Command-line flags to control the application's behavior.
 	var login bool
 	var codexLogin bool
