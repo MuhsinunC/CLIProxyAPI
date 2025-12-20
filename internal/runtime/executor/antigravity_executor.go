@@ -632,6 +632,17 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
+	// Debug logging for thinking state in Antigravity
+	thinkingBudget := gjson.GetBytes(translated, "request.generationConfig.thinkingConfig.thinkingBudget")
+	thinkingLevel := gjson.GetBytes(translated, "request.generationConfig.thinkingConfig.thinkingLevel")
+	if thinkingBudget.Exists() {
+		fmt.Printf("[ANTIGRAVITY-STREAM] THINKING: ENABLED (budget=%d) for model=%s\n", thinkingBudget.Int(), req.Model)
+	} else if thinkingLevel.Exists() {
+		fmt.Printf("[ANTIGRAVITY-STREAM] THINKING: ENABLED (level=%s) for model=%s\n", thinkingLevel.String(), req.Model)
+	} else {
+		fmt.Printf("[ANTIGRAVITY-STREAM] THINKING: NOT ENABLED for model=%s\n", req.Model)
+	}
+
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
