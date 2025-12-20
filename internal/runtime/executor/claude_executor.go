@@ -41,6 +41,11 @@ func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecu
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
 
+// enableToolLoopThinkingDisable controls whether we automatically disable thinking
+// when a tool loop is detected (missing thinking blocks in assistant messages).
+// Set to false to disable this workaround and let the Claude API error surface.
+const enableToolLoopThinkingDisable = false
+
 // PrepareRequest injects Claude credentials into the outgoing HTTP request.
 func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if req == nil {
@@ -134,7 +139,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Disable thinking if in a tool loop without cached thinking blocks
 	// (Claude requires thinking blocks before tool_use in assistant messages)
-	body = disableThinkingInToolLoop(body)
+	if enableToolLoopThinkingDisable {
+		body = disableThinkingInToolLoop(body)
+	}
 
 	// Log if thinking was disabled by tool loop detection
 	thinkingAfter := gjson.GetBytes(body, "thinking.type").String()
@@ -288,7 +295,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Disable thinking if in a tool loop without cached thinking blocks
 	// (Claude requires thinking blocks before tool_use in assistant messages)
-	body = disableThinkingInToolLoop(body)
+	if enableToolLoopThinkingDisable {
+		body = disableThinkingInToolLoop(body)
+	}
 
 	// Log if thinking was disabled by tool loop detection
 	thinkingAfter := gjson.GetBytes(body, "thinking.type").String()
