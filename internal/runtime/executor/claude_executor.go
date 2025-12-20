@@ -120,6 +120,28 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 
+	// Ensure max_tokens > thinking.budget_tokens when thinking is enabled
+	body = ensureMaxTokensForThinking(model, body)
+
+	// Log thinking state before potential disable
+	thinkingBefore := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingBefore == "enabled" {
+		fmt.Printf("[CLAUDE-EXECUTOR] THINKING: ENABLED (budget=%d) for model=%s\n",
+			gjson.GetBytes(body, "thinking.budget_tokens").Int(), req.Model)
+	} else {
+		fmt.Printf("[CLAUDE-EXECUTOR] THINKING: NOT ENABLED for model=%s\n", req.Model)
+	}
+
+	// Disable thinking if in a tool loop without cached thinking blocks
+	// (Claude requires thinking blocks before tool_use in assistant messages)
+	body = disableThinkingInToolLoop(body)
+
+	// Log if thinking was disabled by tool loop detection
+	thinkingAfter := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingBefore == "enabled" && thinkingAfter != "enabled" {
+		fmt.Printf("[CLAUDE-EXECUTOR] THINKING: DISABLED (tool loop detected - missing thinking blocks)\n")
+	}
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -251,6 +273,28 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
+
+	// Ensure max_tokens > thinking.budget_tokens when thinking is enabled
+	body = ensureMaxTokensForThinking(model, body)
+
+	// Log thinking state before potential disable
+	thinkingBefore := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingBefore == "enabled" {
+		fmt.Printf("[CLAUDE-EXECUTOR-STREAM] THINKING: ENABLED (budget=%d) for model=%s\n",
+			gjson.GetBytes(body, "thinking.budget_tokens").Int(), req.Model)
+	} else {
+		fmt.Printf("[CLAUDE-EXECUTOR-STREAM] THINKING: NOT ENABLED for model=%s\n", req.Model)
+	}
+
+	// Disable thinking if in a tool loop without cached thinking blocks
+	// (Claude requires thinking blocks before tool_use in assistant messages)
+	body = disableThinkingInToolLoop(body)
+
+	// Log if thinking was disabled by tool loop detection
+	thinkingAfter := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingBefore == "enabled" && thinkingAfter != "enabled" {
+		fmt.Printf("[CLAUDE-EXECUTOR-STREAM] THINKING: DISABLED (tool loop detected - missing thinking blocks)\n")
+	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -826,161 +870,94 @@ func stripClaudeToolPrefixFromStreamLine(line []byte, prefix string) []byte {
 	return updated
 }
 
-// getClientUserAgent extracts the client User-Agent from the gin context.
-func getClientUserAgent(ctx context.Context) string {
-	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		return ginCtx.GetHeader("User-Agent")
-	}
-	return ""
-}
-
-// getCloakConfigFromAuth extracts cloak configuration from auth attributes.
-// Returns (cloakMode, strictMode, sensitiveWords).
-func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string) {
-	if auth == nil || auth.Attributes == nil {
-		return "auto", false, nil
+// disableThinkingInToolLoop detects if we're in a "tool loop" (last user message contains tool_result)
+// and the assistant messages don't have thinking blocks. In this case, Claude API requires thinking
+// blocks before tool_use content, but OpenAI-format clients like Cursor don't send them.
+// The workaround is to temporarily disable thinking to allow the tool loop to complete.
+// This matches cursor-claude-connector's fallback approach when cached thinking blocks are unavailable.
+func disableThinkingInToolLoop(payload []byte) []byte {
+	// Check if thinking is enabled
+	thinkingType := gjson.GetBytes(payload, "thinking.type").String()
+	if thinkingType != "enabled" {
+		return payload
 	}
 
-	cloakMode := auth.Attributes["cloak_mode"]
-	if cloakMode == "" {
-		cloakMode = "auto"
+	// Check if we're in a tool loop (last user message contains tool_result)
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return payload
 	}
 
-	strictMode := strings.ToLower(auth.Attributes["cloak_strict_mode"]) == "true"
-
-	var sensitiveWords []string
-	if wordsStr := auth.Attributes["cloak_sensitive_words"]; wordsStr != "" {
-		sensitiveWords = strings.Split(wordsStr, ",")
-		for i := range sensitiveWords {
-			sensitiveWords[i] = strings.TrimSpace(sensitiveWords[i])
+	// Find the last user message
+	var lastUserContent gjson.Result
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		if msg.Get("role").String() == "user" {
+			lastUserContent = msg.Get("content")
 		}
+		return true
+	})
+
+	if !lastUserContent.IsArray() {
+		return payload
 	}
 
-	return cloakMode, strictMode, sensitiveWords
-}
+	// Check if last user message contains tool_result
+	isInsideToolLoop := false
+	lastUserContent.ForEach(func(_, block gjson.Result) bool {
+		if block.Get("type").String() == "tool_result" {
+			isInsideToolLoop = true
+			return false // stop iteration
+		}
+		return true
+	})
 
-// resolveClaudeKeyCloakConfig finds the matching ClaudeKey config and returns its CloakConfig.
-func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config.CloakConfig {
-	if cfg == nil || auth == nil {
-		return nil
+	if !isInsideToolLoop {
+		return payload
 	}
 
-	apiKey, baseURL := claudeCreds(auth)
-	if apiKey == "" {
-		return nil
-	}
+	// We're in a tool loop - check if assistant messages have thinking blocks
+	// If any assistant message with tool_use lacks a thinking block, disable thinking
+	hasAssistantWithToolUse := false
+	allHaveThinking := true
 
-	for i := range cfg.ClaudeKey {
-		entry := &cfg.ClaudeKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		if msg.Get("role").String() != "assistant" {
+			return true
+		}
 
-		// Match by API key
-		if strings.EqualFold(cfgKey, apiKey) {
-			// If baseURL is specified, also check it
-			if baseURL != "" && cfgBase != "" && !strings.EqualFold(cfgBase, baseURL) {
-				continue
+		content := msg.Get("content")
+		if !content.IsArray() {
+			return true
+		}
+
+		hasToolUse := false
+		hasThinking := false
+
+		content.ForEach(func(_, block gjson.Result) bool {
+			blockType := block.Get("type").String()
+			if blockType == "tool_use" {
+				hasToolUse = true
 			}
-			return entry.Cloak
+			if blockType == "thinking" || blockType == "redacted_thinking" {
+				hasThinking = true
+			}
+			return true
+		})
+
+		if hasToolUse {
+			hasAssistantWithToolUse = true
+			if !hasThinking {
+				allHaveThinking = false
+				return false // stop iteration
+			}
 		}
-	}
+		return true
+	})
 
-	return nil
-}
-
-// injectFakeUserID generates and injects a fake user ID into the request metadata.
-func injectFakeUserID(payload []byte) []byte {
-	metadata := gjson.GetBytes(payload, "metadata")
-	if !metadata.Exists() {
-		payload, _ = sjson.SetBytes(payload, "metadata.user_id", generateFakeUserID())
-		return payload
-	}
-
-	existingUserID := gjson.GetBytes(payload, "metadata.user_id").String()
-	if existingUserID == "" || !isValidUserID(existingUserID) {
-		payload, _ = sjson.SetBytes(payload, "metadata.user_id", generateFakeUserID())
-	}
-	return payload
-}
-
-// checkSystemInstructionsWithMode injects Claude Code system prompt.
-// In strict mode, it replaces all user system messages.
-// In non-strict mode (default), it prepends to existing system messages.
-func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	system := gjson.GetBytes(payload, "system")
-	claudeCodeInstructions := `[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}]`
-
-	if strictMode {
-		// Strict mode: replace all system messages with Claude Code prompt only
-		payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
-		return payload
-	}
-
-	// Non-strict mode (default): prepend Claude Code prompt to existing system messages
-	if system.IsArray() {
-		if gjson.GetBytes(payload, "system.0.text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
-			system.ForEach(func(_, part gjson.Result) bool {
-				if part.Get("type").String() == "text" {
-					claudeCodeInstructions, _ = sjson.SetRaw(claudeCodeInstructions, "-1", part.Raw)
-				}
-				return true
-			})
-			payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
-		}
-	} else {
-		payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
-	}
-	return payload
-}
-
-// applyCloaking applies cloaking transformations to the payload based on config and client.
-// Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
-func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string) []byte {
-	clientUserAgent := getClientUserAgent(ctx)
-
-	// Get cloak config from ClaudeKey configuration
-	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
-
-	// Determine cloak settings
-	var cloakMode string
-	var strictMode bool
-	var sensitiveWords []string
-
-	if cloakCfg != nil {
-		cloakMode = cloakCfg.Mode
-		strictMode = cloakCfg.StrictMode
-		sensitiveWords = cloakCfg.SensitiveWords
-	}
-
-	// Fallback to auth attributes if no config found
-	if cloakMode == "" {
-		attrMode, attrStrict, attrWords := getCloakConfigFromAuth(auth)
-		cloakMode = attrMode
-		if !strictMode {
-			strictMode = attrStrict
-		}
-		if len(sensitiveWords) == 0 {
-			sensitiveWords = attrWords
-		}
-	}
-
-	// Determine if cloaking should be applied
-	if !shouldCloak(cloakMode, clientUserAgent) {
-		return payload
-	}
-
-	// Skip system instructions for claude-3-5-haiku models
-	if !strings.HasPrefix(model, "claude-3-5-haiku") {
-		payload = checkSystemInstructionsWithMode(payload, strictMode)
-	}
-
-	// Inject fake user ID
-	payload = injectFakeUserID(payload)
-
-	// Apply sensitive word obfuscation
-	if len(sensitiveWords) > 0 {
-		matcher := buildSensitiveWordMatcher(sensitiveWords)
-		payload = obfuscateSensitiveWords(payload, matcher)
+	// If we found assistant messages with tool_use but without thinking blocks,
+	// disable thinking to avoid the Claude API error
+	if hasAssistantWithToolUse && !allHaveThinking {
+		payload, _ = sjson.DeleteBytes(payload, "thinking")
 	}
 
 	return payload
