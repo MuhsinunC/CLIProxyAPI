@@ -12,10 +12,13 @@ Scenario:
 """
 
 import json
+import os
 import requests
 
-PROXY_URL = "https://sensitive-cheryle-unwillfully.ngrok-free.dev/v1/chat/completions"
-API_KEY = "muhsinun-api-key"
+# Load from environment variables (set in .env file)
+NGROK_DOMAIN = os.environ.get("NGROK_DOMAIN", "localhost:8000")
+PROXY_URL = f"https://{NGROK_DOMAIN}/v1/chat/completions"
+API_KEY = os.environ.get("CLIPROXYAPI_KEY", "test-api-key")
 MODEL = "claude-sonnet-4-20250514(xhigh)"
 
 
