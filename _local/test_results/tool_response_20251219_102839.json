@@ -1,0 +1,16 @@
+data: {"id":"chatcmpl-01LMzQrafHs9LhWaM1MebHWc","object":"chat.completion.chunk","created":1766158121,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01LMzQrafHs9LhWaM1MebHWc","object":"chat.completion.chunk","created":1766158121,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"toolu_01X8ecjLv59as1T9MsSSsKrv","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01LMzQrafHs9LhWaM1MebHWc","object":"chat.completion.chunk","created":1766158122,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"target_file\": \"/Users/user/Documents/"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01LMzQrafHs9LhWaM1MebHWc","object":"chat.completion.chunk","created":1766158122,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"Muhsinun/Projects/GitHub/"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01LMzQrafHs9LhWaM1MebHWc","object":"chat.completion.chunk","created":1766158122,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"CLIProxyAPI/README."}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01LMzQrafHs9LhWaM1MebHWc","object":"chat.completion.chunk","created":1766158122,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"md"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01LMzQrafHs9LhWaM1MebHWc","object":"chat.completion.chunk","created":1766158122,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01LMzQrafHs9LhWaM1MebHWc","object":"chat.completion.chunk","created":1766158122,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+

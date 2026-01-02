@@ -1,0 +1,8 @@
+data: {"id":"chatcmpl-1766158182292","object":"chat.completion.chunk","created":1766158182,"model":"claude-unknown","choices":[{"index":0,"delta":{"content":"Hello there, how are you?"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1766158182371","object":"chat.completion.chunk","created":1766158182,"model":"claude-unknown","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-1766158182376","object":"chat.completion.chunk","created":1766158182,"model":"claude-unknown","choices":[{"index":0,"delta":{},"finish_reason":null}],"usage":{"prompt_tokens":80,"completion_tokens":92,"total_tokens":172}}
+
+data: [DONE]
+

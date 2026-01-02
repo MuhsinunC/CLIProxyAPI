@@ -40,14 +40,60 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	re := gjson.GetBytes(rawJSON, "reasoning_effort")
 	if re.Exists() {
 		effort := strings.ToLower(strings.TrimSpace(re.String()))
-		if effort != "" {
-			thinkingPath := "request.generationConfig.thinkingConfig"
-			if effort == "auto" {
-				out, _ = sjson.SetBytes(out, thinkingPath+".thinkingBudget", -1)
-				out, _ = sjson.SetBytes(out, thinkingPath+".includeThoughts", true)
-			} else {
-				out, _ = sjson.SetBytes(out, thinkingPath+".thinkingLevel", effort)
-				out, _ = sjson.SetBytes(out, thinkingPath+".includeThoughts", effort != "none")
+		if util.IsGemini3Model(modelName) {
+			switch effort {
+			case "none":
+				out, _ = sjson.DeleteBytes(out, "request.generationConfig.thinkingConfig")
+			case "auto":
+				includeThoughts := true
+				out = util.ApplyGeminiCLIThinkingLevel(out, "", &includeThoughts)
+			default:
+				if level, ok := util.ValidateGemini3ThinkingLevel(modelName, effort); ok {
+					out = util.ApplyGeminiCLIThinkingLevel(out, level, nil)
+				}
+			}
+		} else if !util.ModelUsesThinkingLevels(modelName) {
+			out = util.ApplyReasoningEffortToGeminiCLI(out, effort)
+		}
+	}
+
+	// Cherry Studio extension extra_body.google.thinking_config (effective only when official fields are absent)
+	// Only apply for models that use numeric budgets, not discrete levels.
+	if !hasOfficialThinking && util.ModelSupportsThinking(modelName) && !util.ModelUsesThinkingLevels(modelName) {
+		if tc := gjson.GetBytes(rawJSON, "extra_body.google.thinking_config"); tc.Exists() && tc.IsObject() {
+			var setBudget bool
+			var budget int
+
+			if v := tc.Get("thinkingBudget"); v.Exists() {
+				budget = int(v.Int())
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
+				setBudget = true
+			} else if v := tc.Get("thinking_budget"); v.Exists() {
+				budget = int(v.Int())
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
+				setBudget = true
+			}
+
+			if v := tc.Get("includeThoughts"); v.Exists() {
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", v.Bool())
+			} else if v := tc.Get("include_thoughts"); v.Exists() {
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", v.Bool())
+			} else if setBudget && budget != 0 {
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
+			}
+		}
+	}
+
+	// Claude/Anthropic API format: thinking.type == "enabled" with budget_tokens
+	// This allows Claude Code and other Claude API clients to pass thinking configuration
+	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig").Exists() && util.ModelSupportsThinking(modelName) {
+		if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() {
+			if t.Get("type").String() == "enabled" {
+				if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
+					budget := int(b.Int())
+					out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
+					out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
+				}
 			}
 		}
 	}
@@ -159,31 +205,37 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			content := m.Get("content")
 
 			if (role == "system" || role == "developer") && len(arr) > 1 {
-				// system -> request.systemInstruction as a user message style
-				if content.Type == gjson.String {
-					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
-					out, _ = sjson.SetBytes(out, fmt.Sprintf("request.systemInstruction.parts.%d.text", systemPartIndex), content.String())
-					systemPartIndex++
+				// system -> request.systemInstruction parts
+				if content.Type == gjson.String && content.String() != "" {
+					p := 0
+					parts := gjson.GetBytes(out, "request.systemInstruction.parts")
+					if parts.IsArray() {
+						p = len(parts.Array())
+					}
+					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "system")
+					out, _ = sjson.SetBytes(out, "request.systemInstruction.parts."+itoa(p)+".text", content.String())
 				} else if content.IsObject() && content.Get("type").String() == "text" {
-					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
-					out, _ = sjson.SetBytes(out, fmt.Sprintf("request.systemInstruction.parts.%d.text", systemPartIndex), content.Get("text").String())
-					systemPartIndex++
+					p := 0
+					parts := gjson.GetBytes(out, "request.systemInstruction.parts")
+					if parts.IsArray() {
+						p = len(parts.Array())
+					}
+					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "system")
+					out, _ = sjson.SetBytes(out, "request.systemInstruction.parts."+itoa(p)+".text", content.Get("text").String())
 				} else if content.IsArray() {
 					// Handle array content (Cursor sends tool docs as array of text parts)
-					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
-					var combinedText strings.Builder
+					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "system")
 					content.ForEach(func(_, part gjson.Result) bool {
 						if part.Get("type").String() == "text" {
-							if combinedText.Len() > 0 {
-								combinedText.WriteString("\n\n")
+							p := 0
+							parts := gjson.GetBytes(out, "request.systemInstruction.parts")
+							if parts.IsArray() {
+								p = len(parts.Array())
 							}
-							combinedText.WriteString(part.Get("text").String())
+							out, _ = sjson.SetBytes(out, "request.systemInstruction.parts."+itoa(p)+".text", part.Get("text").String())
 						}
 						return true
 					})
-					if combinedText.Len() > 0 {
-						out, _ = sjson.SetBytes(out, "request.systemInstruction.parts.0.text", combinedText.String())
-					}
 				}
 			} else if role == "user" || ((role == "system" || role == "developer") && len(arr) == 1) {
 				// Build single user content node to avoid splitting into multiple contents

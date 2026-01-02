@@ -1,0 +1,20 @@
+data: {"id":"chatcmpl-01Hd1cttPHxythSJKd3tKhNE","object":"chat.completion.chunk","created":1766158184,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01Hd1cttPHxythSJKd3tKhNE","object":"chat.completion.chunk","created":1766158185,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":"I'll rea"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01Hd1cttPHxythSJKd3tKhNE","object":"chat.completion.chunk","created":1766158185,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":"d the README"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01Hd1cttPHxythSJKd3tKhNE","object":"chat.completion.chunk","created":1766158185,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":".md file for you."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01Hd1cttPHxythSJKd3tKhNE","object":"chat.completion.chunk","created":1766158186,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"id":"toolu_01UmyGxBJpRFSvNoYLhhzdY3","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01Hd1cttPHxythSJKd3tKhNE","object":"chat.completion.chunk","created":1766158186,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"function":{"arguments":"{\"target_file\": \"/Users/user/Documents/"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01Hd1cttPHxythSJKd3tKhNE","object":"chat.completion.chunk","created":1766158186,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"function":{"arguments":"md"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01Hd1cttPHxythSJKd3tKhNE","object":"chat.completion.chunk","created":1766158186,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"function":{"arguments":"\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01Hd1cttPHxythSJKd3tKhNE","object":"chat.completion.chunk","created":1766158187,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{},"finish_reason":null}],"usage":{"prompt_tokens":483,"completion_tokens":7,"total_tokens":490}}
+
+data: [DONE]
+

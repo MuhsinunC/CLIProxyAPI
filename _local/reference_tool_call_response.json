@@ -1,0 +1,74 @@
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155320,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155323,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":"I don't actually"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155323,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" have the ability to access your"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155323,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" file"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155324,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" system or list files in your current"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155324,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" assistant, but I'm not a CLI"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155324,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" tool and don't have direct"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155324,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" access"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155324,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" to your computer's files"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155324,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":".\n\nTo"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155324,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" list files in your current directory, you"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155324,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" would need to use your"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155324,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" operating system's comman"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155324,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":"d line"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155324,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" tools"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155324,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":":"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155324,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":"\n\n- On"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155324,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" Windows: `dir` or"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155324,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" `ls` (if"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155324,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" using"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155325,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" PowerShell)\n- On mac"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155325,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":"OS/"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155325,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":"Linux: `ls`"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155325,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":"d like help"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155325,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" with file"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155325,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" management"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155325,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" tasks or"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155325,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" have"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155325,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" questions"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155325,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" about specific"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155325,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" files you"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155325,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" with, feel"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155325,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" free to share"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155325,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" that"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155325,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":" information an"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155326,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":"d I'll "},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-01XtMZxHofDA15RPJrBZZuFb","object":"chat.completion.chunk","created":1766155326,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+

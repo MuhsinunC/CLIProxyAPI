@@ -40,14 +40,46 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	re := gjson.GetBytes(rawJSON, "reasoning_effort")
 	if re.Exists() {
 		effort := strings.ToLower(strings.TrimSpace(re.String()))
-		if effort != "" {
-			thinkingPath := "generationConfig.thinkingConfig"
-			if effort == "auto" {
-				out, _ = sjson.SetBytes(out, thinkingPath+".thinkingBudget", -1)
-				out, _ = sjson.SetBytes(out, thinkingPath+".includeThoughts", true)
-			} else {
-				out, _ = sjson.SetBytes(out, thinkingPath+".thinkingLevel", effort)
-				out, _ = sjson.SetBytes(out, thinkingPath+".includeThoughts", effort != "none")
+		if util.IsGemini3Model(modelName) {
+			switch effort {
+			case "none":
+				out, _ = sjson.DeleteBytes(out, "generationConfig.thinkingConfig")
+			case "auto":
+				includeThoughts := true
+				out = util.ApplyGeminiThinkingLevel(out, "", &includeThoughts)
+			default:
+				if level, ok := util.ValidateGemini3ThinkingLevel(modelName, effort); ok {
+					out = util.ApplyGeminiThinkingLevel(out, level, nil)
+				}
+			}
+		} else if !util.ModelUsesThinkingLevels(modelName) {
+			out = util.ApplyReasoningEffortToGemini(out, effort)
+		}
+	}
+
+	// Cherry Studio extension extra_body.google.thinking_config (effective only when official fields are absent)
+	// Only apply for models that use numeric budgets, not discrete levels.
+	if !hasOfficialThinking && util.ModelSupportsThinking(modelName) && !util.ModelUsesThinkingLevels(modelName) {
+		if tc := gjson.GetBytes(rawJSON, "extra_body.google.thinking_config"); tc.Exists() && tc.IsObject() {
+			var setBudget bool
+			var budget int
+
+			if v := tc.Get("thinkingBudget"); v.Exists() {
+				budget = int(v.Int())
+				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingBudget", budget)
+				setBudget = true
+			} else if v := tc.Get("thinking_budget"); v.Exists() {
+				budget = int(v.Int())
+				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingBudget", budget)
+				setBudget = true
+			}
+
+			if v := tc.Get("includeThoughts"); v.Exists() {
+				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.includeThoughts", v.Bool())
+			} else if v := tc.Get("include_thoughts"); v.Exists() {
+				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.includeThoughts", v.Bool())
+			} else if setBudget && budget != 0 {
+				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.includeThoughts", true)
 			}
 		}
 	}
@@ -143,22 +175,24 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			content := m.Get("content")
 
 			if (role == "system" || role == "developer") && len(arr) > 1 {
-				// system -> system_instruction as a user message style
+				// system -> system_instruction parts
+				p := 0
+				parts := gjson.GetBytes(out, "system_instruction.parts")
+				if parts.IsArray() {
+					p = len(parts.Array())
+				}
 				if content.Type == gjson.String {
 					out, _ = sjson.SetBytes(out, "system_instruction.role", "user")
-					out, _ = sjson.SetBytes(out, fmt.Sprintf("system_instruction.parts.%d.text", systemPartIndex), content.String())
-					systemPartIndex++
+					out, _ = sjson.SetBytes(out, "system_instruction.parts."+itoa(p)+".text", content.String())
 				} else if content.IsObject() && content.Get("type").String() == "text" {
 					out, _ = sjson.SetBytes(out, "system_instruction.role", "user")
-					out, _ = sjson.SetBytes(out, fmt.Sprintf("system_instruction.parts.%d.text", systemPartIndex), content.Get("text").String())
-					systemPartIndex++
+					out, _ = sjson.SetBytes(out, "system_instruction.parts."+itoa(p)+".text", content.Get("text").String())
 				} else if content.IsArray() {
 					contents := content.Array()
 					if len(contents) > 0 {
 						out, _ = sjson.SetBytes(out, "system_instruction.role", "user")
 						for j := 0; j < len(contents); j++ {
-							out, _ = sjson.SetBytes(out, fmt.Sprintf("system_instruction.parts.%d.text", systemPartIndex), contents[j].Get("text").String())
-							systemPartIndex++
+							out, _ = sjson.SetBytes(out, fmt.Sprintf("system_instruction.parts.%d.text", p+j), contents[j].Get("text").String())
 						}
 					}
 				}

@@ -65,9 +65,8 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 		return []string{}
 	}
 
-	// Initialize the OpenAI SSE base template.
-	// We use a base template and clone it for each candidate to support multiple candidates.
-	baseTemplate := `{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`
+	// Initialize the OpenAI SSE template.
+	template := `{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null}]}`
 
 	// Extract and set the model version.
 	if modelVersionResult := gjson.GetBytes(rawJSON, "modelVersion"); modelVersionResult.Exists() {
@@ -87,7 +86,12 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 
 	// Extract and set the response ID.
 	if responseIDResult := gjson.GetBytes(rawJSON, "responseId"); responseIDResult.Exists() {
-		baseTemplate, _ = sjson.Set(baseTemplate, "id", responseIDResult.String())
+		template, _ = sjson.Set(template, "id", responseIDResult.String())
+	}
+
+	// Extract and set the finish reason.
+	if finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
+		template, _ = sjson.Set(template, "choices.0.finish_reason", strings.ToLower(finishReasonResult.String()))
 	}
 
 	// Extract and set usage metadata (token counts).
@@ -237,7 +241,11 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 		}
 	}
 
-	return responseStrings
+	if hasFunctionCall {
+		template, _ = sjson.Set(template, "choices.0.finish_reason", "tool_calls")
+	}
+
+	return []string{template}
 }
 
 // ConvertGeminiResponseToOpenAINonStream converts a non-streaming Gemini response to a non-streaming OpenAI response.
@@ -255,9 +263,8 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 //   - string: An OpenAI-compatible JSON response containing all message content and metadata
 func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
 	var unixTimestamp int64
-	// Initialize template with an empty choices array to support multiple candidates.
-	template := `{"id":"","object":"chat.completion","created":123456,"model":"model","choices":[]}`
-
+	// Initial response template
+	template := `{"id":"","object":"chat.completion","created":123456,"model":"model","choices":[{"index":0,"message":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null}]}`
 	if modelVersionResult := gjson.GetBytes(rawJSON, "modelVersion"); modelVersionResult.Exists() {
 		template, _ = sjson.Set(template, "model", modelVersionResult.String())
 	}
@@ -274,6 +281,10 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 
 	if responseIDResult := gjson.GetBytes(rawJSON, "responseId"); responseIDResult.Exists() {
 		template, _ = sjson.Set(template, "id", responseIDResult.String())
+	}
+
+	if finishReasonResult := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finishReasonResult.Exists() {
+		template, _ = sjson.Set(template, "choices.0.finish_reason", strings.ToLower(finishReasonResult.String()))
 	}
 
 	if usageResult := gjson.GetBytes(rawJSON, "usageMetadata"); usageResult.Exists() {
@@ -329,67 +340,8 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 						inlineDataResult = partResult.Get("inline_data")
 					}
 
-					if partTextResult.Exists() {
-						// Append text content, distinguishing between regular content and reasoning.
-						if partResult.Get("thought").Bool() {
-							oldVal := gjson.Get(choiceTemplate, "message.reasoning_content").String()
-							choiceTemplate, _ = sjson.Set(choiceTemplate, "message.reasoning_content", oldVal+partTextResult.String())
-						} else {
-							oldVal := gjson.Get(choiceTemplate, "message.content").String()
-							choiceTemplate, _ = sjson.Set(choiceTemplate, "message.content", oldVal+partTextResult.String())
-						}
-						choiceTemplate, _ = sjson.Set(choiceTemplate, "message.role", "assistant")
-					} else if functionCallResult.Exists() {
-						// Append function call content to the tool_calls array.
-						hasFunctionCall = true
-						toolCallsResult := gjson.Get(choiceTemplate, "message.tool_calls")
-						if !toolCallsResult.Exists() || !toolCallsResult.IsArray() {
-							choiceTemplate, _ = sjson.SetRaw(choiceTemplate, "message.tool_calls", `[]`)
-						}
-						functionCallItemTemplate := `{"id": "","type": "function","function": {"name": "","arguments": ""}}`
-						fcName := functionCallResult.Get("name").String()
-						functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "id", fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)))
-						functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "function.name", fcName)
-						if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
-							functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "function.arguments", fcArgsResult.Raw)
-						}
-						choiceTemplate, _ = sjson.Set(choiceTemplate, "message.role", "assistant")
-						choiceTemplate, _ = sjson.SetRaw(choiceTemplate, "message.tool_calls.-1", functionCallItemTemplate)
-					} else if inlineDataResult.Exists() {
-						data := inlineDataResult.Get("data").String()
-						if data != "" {
-							mimeType := inlineDataResult.Get("mimeType").String()
-							if mimeType == "" {
-								mimeType = inlineDataResult.Get("mime_type").String()
-							}
-							if mimeType == "" {
-								mimeType = "image/png"
-							}
-							imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
-							imagesResult := gjson.Get(choiceTemplate, "message.images")
-							if !imagesResult.Exists() || !imagesResult.IsArray() {
-								choiceTemplate, _ = sjson.SetRaw(choiceTemplate, "message.images", `[]`)
-							}
-							imageIndex := len(gjson.Get(choiceTemplate, "message.images").Array())
-							imagePayload := `{"type":"image_url","image_url":{"url":""}}`
-							imagePayload, _ = sjson.Set(imagePayload, "index", imageIndex)
-							imagePayload, _ = sjson.Set(imagePayload, "image_url.url", imageURL)
-							choiceTemplate, _ = sjson.Set(choiceTemplate, "message.role", "assistant")
-							choiceTemplate, _ = sjson.SetRaw(choiceTemplate, "message.images.-1", imagePayload)
-						}
-					}
-				}
-			}
-
-			if hasFunctionCall {
-				choiceTemplate, _ = sjson.Set(choiceTemplate, "finish_reason", "tool_calls")
-				choiceTemplate, _ = sjson.Set(choiceTemplate, "native_finish_reason", "tool_calls")
-			}
-
-			// Append the constructed choice to the main choices array.
-			template, _ = sjson.SetRaw(template, "choices.-1", choiceTemplate)
-			return true
-		})
+	if hasFunctionCall {
+		template, _ = sjson.Set(template, "choices.0.finish_reason", "tool_calls")
 	}
 
 	return template

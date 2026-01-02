@@ -25,9 +25,11 @@ import (
 type convertCliResponseToOpenAIChatParams struct {
 	UnixTimestamp  int64
 	FunctionIndex  int
+	HadToolCall    bool            // True if a tool call has been emitted in this sequence
 	XMLToolBuffer  strings.Builder // Accumulates XML tool call text
 	InXMLToolBlock bool            // True when inside a <tool_call> block
 	TextBeforeXML  string          // Text before the XML started
+	IsFirstChunk   bool            // True if this is the first chunk emitted
 }
 
 // functionCallIDCounter provides a process-wide unique counter for function call identifiers.
@@ -99,6 +101,8 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		*param = &convertCliResponseToOpenAIChatParams{
 			UnixTimestamp: 0,
 			FunctionIndex: 0,
+			HadToolCall:   false,
+			IsFirstChunk:  true,
 		}
 	}
 
@@ -107,7 +111,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	}
 
 	// Initialize the OpenAI SSE template.
-	template := `{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`
+	template := `{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null}]}`
 
 	// Extract and set the model version.
 	if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
@@ -131,9 +135,15 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	}
 
 	// Extract and set the finish reason.
+	hasMetadata := false
 	if finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
-		template, _ = sjson.Set(template, "choices.0.finish_reason", strings.ToLower(finishReasonResult.String()))
-		template, _ = sjson.Set(template, "choices.0.native_finish_reason", strings.ToLower(finishReasonResult.String()))
+		fr := strings.ToLower(finishReasonResult.String())
+		params := (*param).(*convertCliResponseToOpenAIChatParams)
+		if fr == "stop" && params.HadToolCall {
+			fr = "tool_calls"
+		}
+		template, _ = sjson.Set(template, "choices.0.finish_reason", fr)
+		hasMetadata = true
 	}
 
 	// Extract and set usage metadata (token counts).
@@ -218,14 +228,8 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 
 					// Check if we have complete tool call blocks to parse
 					if params.InXMLToolBlock && strings.Contains(accumulated, "</tool_call>") {
-						// Debug: show what we're about to parse
-						fmt.Printf("[ANTIGRAVITY-OPENAI] About to parse buffer (len=%d): %s\n", len(accumulated), accumulated[:min(200, len(accumulated))])
-
 						// Try to parse all complete tool calls
 						parsedCalls, remainingText := parseXMLToolCallsFromText(accumulated)
-
-						fmt.Printf("[ANTIGRAVITY-OPENAI] ACCUMULATED: Parsed %d tool calls from buffer\n", len(parsedCalls))
-						fmt.Printf("[ANTIGRAVITY-OPENAI] Remaining text after parse: %q\n", remainingText)
 
 						if len(parsedCalls) > 0 {
 							hasContent = true
@@ -241,8 +245,8 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 
 							// Emit parsed tool calls
 							for _, tc := range parsedCalls {
-								fmt.Printf("[ANTIGRAVITY-OPENAI] Emitting tool call: name=%s, args=%s\n", tc.Name, tc.Arguments)
 								hasFunctionCall = true
+								params.HadToolCall = true
 								toolCallsResult := gjson.Get(template, "choices.0.delta.tool_calls")
 								functionCallIndex := params.FunctionIndex
 								params.FunctionIndex++
@@ -253,10 +257,11 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 								}
 
 								functionCallTemplate := `{"id": "","index": 0,"type": "function","function": {"name": "","arguments": ""}}`
-								functionCallTemplate, _ = sjson.Set(functionCallTemplate, "id", fmt.Sprintf("%s-%d-%d", tc.Name, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)))
+								shortID := fmt.Sprintf("call_%x_%d", time.Now().UnixNano()%1000000, atomic.AddUint64(&functionCallIDCounter, 1))
+								functionCallTemplate, _ = sjson.Set(functionCallTemplate, "id", shortID)
 								functionCallTemplate, _ = sjson.Set(functionCallTemplate, "index", functionCallIndex)
 								functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.name", tc.Name)
-								// Use SetRaw since tc.Arguments is already valid JSON
+								// Use Set since tc.Arguments is already valid JSON
 								functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.arguments", tc.Arguments)
 								template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
 								template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls.-1", functionCallTemplate)
@@ -303,6 +308,8 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 				// Handle function call content.
 				hasFunctionCall = true
 				hasContent = true
+				params := (*param).(*convertCliResponseToOpenAIChatParams)
+				params.HadToolCall = true
 				toolCallsResult := gjson.Get(template, "choices.0.delta.tool_calls")
 				functionCallIndex := (*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex
 				(*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex++
@@ -314,7 +321,8 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 
 				functionCallTemplate := `{"id": "","index": 0,"type": "function","function": {"name": "","arguments": ""}}`
 				fcName := functionCallResult.Get("name").String()
-				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "id", fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)))
+				shortID := fmt.Sprintf("call_%x_%d", time.Now().UnixNano()%1000000, atomic.AddUint64(&functionCallIDCounter, 1))
+				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "id", shortID)
 				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "index", functionCallIndex)
 				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.name", fcName)
 				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
@@ -349,15 +357,19 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		}
 	}
 
-	// Only emit if we have meaningful content
-	if !hasContent && !hasFunctionCall {
+	params := (*param).(*convertCliResponseToOpenAIChatParams)
+
+	// Ensure first chunk has a role to avoid "empty model output" errors in some clients
+	if params.IsFirstChunk {
+		template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
+	}
+
+	// Only emit if we have meaningful content or metadata
+	if !hasContent && !hasFunctionCall && !hasMetadata && !params.IsFirstChunk {
 		return []string{}
 	}
 
-	if hasFunctionCall {
-		template, _ = sjson.Set(template, "choices.0.finish_reason", "tool_calls")
-		template, _ = sjson.Set(template, "choices.0.native_finish_reason", "tool_calls")
-	}
+	params.IsFirstChunk = false
 
 	return []string{template}
 }

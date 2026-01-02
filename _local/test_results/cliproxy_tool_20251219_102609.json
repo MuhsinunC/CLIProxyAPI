@@ -1,0 +1,12 @@
+data: {"id":"chatcmpl-0178aanxfWSzYupziwHyeZEo","object":"chat.completion.chunk","created":1766157997,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-0178aanxfWSzYupziwHyeZEo","object":"chat.completion.chunk","created":1766157998,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":"I'll read the README"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-0178aanxfWSzYupziwHyeZEo","object":"chat.completion.chunk","created":1766157998,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":".md file for you."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-0178aanxfWSzYupziwHyeZEo","object":"chat.completion.chunk","created":1766157999,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-0178aanxfWSzYupziwHyeZEo","object":"chat.completion.chunk","created":1766157999,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{},"finish_reason":null}],"usage":{"prompt_tokens":966,"completion_tokens":179,"total_tokens":1145}}
+
+data: [DONE]
+

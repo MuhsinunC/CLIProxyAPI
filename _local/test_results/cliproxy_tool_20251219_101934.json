@@ -1,0 +1,1 @@
+{"type":"error","error":{"type":"invalid_request_error","message":"tools.0: Input tag 'function' found using 'type' does not match any of the expected tags: 'bash_20250124', 'custom', 'text_editor_20250124', 'text_editor_20250429', 'text_editor_20250728', 'web_search_20250305'"},"request_id":"req_011CWGGhG7A2CKgFa6X4AcbD"}

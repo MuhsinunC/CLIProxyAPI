@@ -53,8 +53,21 @@ func GetProviderName(modelName string) []string {
 		appendProvider(provider)
 	}
 
-	if len(providers) > 0 {
-		return providers
+	// Prioritize 'antigravity' if it exists in the list to ensure correct translator routing
+	// for models that support thinking/reasoning.
+	if len(providers) > 1 {
+		antigravityIdx := -1
+		for i, p := range providers {
+			if p == "antigravity" {
+				antigravityIdx = i
+				break
+			}
+		}
+		if antigravityIdx > 0 {
+			// Move antigravity to the front
+			val := providers[antigravityIdx]
+			providers = append([]string{val}, append(providers[:antigravityIdx], providers[antigravityIdx+1:]...)...)
+		}
 	}
 
 	return providers

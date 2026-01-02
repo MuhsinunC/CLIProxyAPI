@@ -1,0 +1,4 @@
+data: {"id":"chatcmpl-012zwD1nBgs5vs8xCcNr47Bc","object":"chat.completion.chunk","created":1766157753,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-012zwD1nBgs5vs8xCcNr47Bc","object":"chat.completion.chunk","created":1766157756,"model":"claude-sonnet-4-20250514","choices":[{"index":0,"delta":{"content":"Hello there, how are you?"},"finish_reason":null}]}
+
