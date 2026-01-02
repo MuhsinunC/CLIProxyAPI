@@ -67,6 +67,8 @@ This was verified by testing DeepSeek R1 via OpenRouter directly in Cursor. Even
 
 **Goal**: Cache thinking blocks server-side to enable tool loops without errors.
 
+**Status**: 🟡 In Progress
+
 ### Why Caching?
 
 When thinking is enabled and a tool loop occurs, Claude API will error if the thinking block is missing:
@@ -79,45 +81,89 @@ Expected `thinking` or `redacted_thinking`, but found `tool_use`.
 ### Architecture
 
 ```
-REQUEST PATH:
-1. Request comes in with tool_result message
-2. Check cache for thinking_last:{conversation_id}
-3. If found: Inject thinking block into request
-4. Forward to Claude
+┌─────────────────────────────────────────────────────────────────┐
+│                         SERVER STARTUP                          │
+├─────────────────────────────────────────────────────────────────┤
+│ 1. Open/Create SQLite file (thinking_cache.db)                  │
+│ 2. Load top N entries (by last_accessed) into RAM cache         │
+│ 3. Fill up to max_memory_mb (default 512MB)                     │
+└─────────────────────────────────────────────────────────────────┘
 
-RESPONSE PATH:
-1. Response comes back from Claude
-2. Extract thinking content + signature
-3. Store in cache: thinking_last:{conversation_id}
-4. Return response with reasoning_content for UI
+┌─────────────────────────────────────────────────────────────────┐
+│                         REQUEST PATH                            │
+├─────────────────────────────────────────────────────────────────┤
+│ 1. Request comes in with tool_result message                    │
+│ 2. Generate conversation_id from request hash                   │
+│ 3. Check RAM cache for thinking block                           │
+│ 4. If not in RAM: Check SQLite (and load into RAM if found)     │
+│ 5. If found: Inject thinking block into request                 │
+│ 6. Forward to Claude                                            │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                         RESPONSE PATH                           │
+├─────────────────────────────────────────────────────────────────┤
+│ 1. Response comes back from Claude with thinking block          │
+│ 2. Extract thinking content + signature                         │
+│ 3. Store in RAM cache (evict LRU if over max_memory_mb)         │
+│ 4. Async write to SQLite (never blocks response)                │
+│ 5. Return response with reasoning_content for UI                │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+### Key Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| RAM-first | Fast reads, no external dependencies |
+| SQLite persistence | Crash recovery, survives restarts |
+| Async SQLite writes | Never slows down responses |
+| RAM eviction only | SQLite is permanent archive |
+| LRU eviction | Keeps recently-used entries hot |
 
 ### Configuration
 
 ```yaml
 claude_thinking_cache:
-  enabled: false
-  backend: "upstash"           # Options: upstash, redis, file
-  upstash_url: "https://xxx.upstash.io"
-  upstash_token: "your-token"
-  max_entries: 10000           # ~5MB at 500 bytes each
+  enabled: true
+  max_memory_mb: 512              # RAM cache size limit (default 512MB)
+  sqlite_path: "thinking_cache.db" # SQLite file path
+```
+
+### SQLite Schema
+
+```sql
+CREATE TABLE thinking_cache (
+  conversation_id TEXT PRIMARY KEY,
+  thinking_block  BLOB NOT NULL,    -- Claude-format thinking with signature
+  created_at      INTEGER NOT NULL, -- Unix timestamp
+  last_accessed   INTEGER NOT NULL  -- For LRU ordering on startup
+);
+
+CREATE INDEX idx_last_accessed ON thinking_cache(last_accessed DESC);
 ```
 
 ### Tasks
 
+- [x] Design RAM + SQLite architecture
 - [ ] Add config struct and YAML parsing
-- [ ] Create cache wrapper (Upstash/Redis/file backends)
-- [ ] Implement conversation ID generation
+- [ ] Create RAM cache with LRU eviction
+- [ ] Implement SQLite read/write layer
+- [ ] Implement async write goroutine
+- [ ] Load top N entries on startup
+- [ ] Implement conversation ID generation (request hash)
 - [ ] Modify request translator to inject cached thinking blocks
 - [ ] Modify response translator to cache thinking blocks
 - [ ] Add tests
 
 ### Memory Estimation
 
-| Conversations | Per Entry | Total |
-|---------------|-----------|-------|
-| 1,000 | 500 bytes | 500 KB |
-| 10,000 | 500 bytes | 5 MB |
+| Entries | Avg Entry Size | Total RAM |
+|---------|---------------|-----------|
+| ~50,000 | ~10 KB | ~500 MB |
+| ~100,000 | ~5 KB | ~500 MB |
+
+Note: Entry size varies based on thinking complexity. SQLite stores unlimited entries.
 
 ---
 
