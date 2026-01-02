@@ -110,8 +110,8 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		return []string{}
 	}
 
-	// Initialize the OpenAI SSE template.
-	template := `{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null}]}`
+	// Initialize the OpenAI SSE template - include both 'reasoning' and 'reasoning_content' for max compatibility
+	template := `{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null}]}`
 
 	// Extract and set the model version.
 	if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
@@ -236,6 +236,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 							// First emit any text that came before tool calls
 							if params.TextBeforeXML != "" {
 								if partResult.Get("thought").Bool() {
+									template, _ = sjson.Set(template, "choices.0.delta.reasoning", params.TextBeforeXML)
 									template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", params.TextBeforeXML)
 								} else {
 									template, _ = sjson.Set(template, "choices.0.delta.content", params.TextBeforeXML)
@@ -278,6 +279,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 									params.InXMLToolBlock = false
 									if strings.TrimSpace(remainingText) != "" {
 										if partResult.Get("thought").Bool() {
+											template, _ = sjson.Set(template, "choices.0.delta.reasoning", remainingText)
 											template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", remainingText)
 										} else {
 											template, _ = sjson.Set(template, "choices.0.delta.content", remainingText)
@@ -298,6 +300,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 					hasContent = true
 					params.XMLToolBuffer.Reset()
 					if partResult.Get("thought").Bool() {
+						template, _ = sjson.Set(template, "choices.0.delta.reasoning", accumulated)
 						template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", accumulated)
 					} else {
 						template, _ = sjson.Set(template, "choices.0.delta.content", accumulated)

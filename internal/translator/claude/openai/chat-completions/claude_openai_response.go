@@ -66,6 +66,9 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 	root := gjson.ParseBytes(rawJSON)
 	eventType := root.Get("type").String()
 
+	// DEBUG: Log all event types received from Claude
+	fmt.Printf("[CLAUDE-RESPONSE-DEBUG] Event type: %s\n", eventType)
+
 	// Base OpenAI streaming response template
 	template := `{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{},"finish_reason":null}]}`
 
@@ -107,6 +110,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 		// Start of a content block (text, tool use, or reasoning)
 		if contentBlock := root.Get("content_block"); contentBlock.Exists() {
 			blockType := contentBlock.Get("type").String()
+			fmt.Printf("[CLAUDE-RESPONSE-DEBUG] content_block_start, block type: %s\n", blockType)
 
 			if blockType == "tool_use" {
 				// Start of tool call - initialize accumulator to track arguments
@@ -144,9 +148,16 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 				}
 			case "thinking_delta":
 				// Accumulate reasoning/thinking content
+				fmt.Printf("[CLAUDE-RESPONSE-DEBUG] Received thinking_delta event\n")
 				if thinking := delta.Get("thinking"); thinking.Exists() {
+					fmt.Printf("[CLAUDE-RESPONSE-DEBUG] Setting reasoning + reasoning_content, length=%d chars\n", len(thinking.String()))
+					// Set BOTH fields for maximum client compatibility
+					// Some clients expect 'reasoning' (newer OpenAI), others 'reasoning_content' (older API)
+					template, _ = sjson.Set(template, "choices.0.delta.reasoning", thinking.String())
 					template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", thinking.String())
 					hasContent = true
+				} else {
+					fmt.Printf("[CLAUDE-RESPONSE-DEBUG] thinking_delta but no 'thinking' field found in delta: %s\n", delta.Raw)
 				}
 			case "input_json_delta":
 				// Tool use input delta - accumulate arguments for tool calls

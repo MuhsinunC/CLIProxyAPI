@@ -8,7 +8,7 @@
 
 | Milestone | Status | Priority |
 |-----------|--------|----------|
-| [M1: Thinking Display in Cursor](#m1-thinking-display-in-cursor) | 🟡 In Progress | High |
+| [M1: Thinking Display in Cursor](#m1-thinking-display-in-cursor) | ❌ Blocked (Cursor Limitation) | Low |
 | [M2: Thinking Block Caching](#m2-thinking-block-caching) | ⚪ Planned | High |
 | [M3: Content-Embedded Fallback](#m3-content-embedded-fallback) | ⚪ Planned | Medium |
 
@@ -16,7 +16,7 @@
 
 ## M1: Thinking Display in Cursor
 
-**Goal**: Verify and fix thinking block display in Cursor IDE for Claude/Gemini models.
+**Status**: ❌ **Blocked** - Cursor does not support thinking display for custom API endpoints.
 
 ### Background
 
@@ -24,19 +24,42 @@ Claude's extended thinking feature provides:
 1. **Thinking content**: The model's reasoning process
 2. **Signature**: Cryptographic signature required for multi-turn tool loops
 
-**Challenge**: Cursor uses OpenAI-compatible API and only forwards `role`, `content`, and `tool_calls`. It does NOT forward `reasoning_content` or custom signature fields.
+### What We Tried
 
-### Tasks
+| Approach | Result |
+|----------|--------|
+| Send `reasoning_content` field in streaming response | ❌ Not displayed |
+| Send `reasoning` field (OpenAI standard) | ❌ Not displayed |
+| Send BOTH `reasoning` and `reasoning_content` | ❌ Not displayed |
+| Test with DeepSeek R1 via OpenRouter | ❌ Not displayed |
+| Test with Claude Opus 4.5 via our proxy | ❌ Not displayed |
 
-- [x] Fixed `include_thoughts` → `includeThoughts` naming for API compatibility
-- [ ] Verify thinking display works for **native Gemini models** (gemini-2.5-pro, gemini-3-flash)
-- [ ] Confirm Claude-via-Antigravity thinking content format
-- [ ] Test with non-exhausted quota
+### Verified Working
 
-### Open Questions
+- ✅ Claude executor logs: `THINKING: ENABLED (budget=32768)`
+- ✅ curl test shows `reasoning` field in response
+- ✅ curl test shows `reasoning_content` in streaming chunks
+- ✅ OpenRouter returns 233 reasoning tokens for DeepSeek R1
 
-1. Does Cursor display `reasoning_content` for thinking models?
-2. Does Claude-via-Antigravity return `thought: true` in response parts?
+### Conclusion (January 2025)
+
+**Cursor's "thinking toggle" feature only works for built-in models**. When using custom API endpoints (Override OpenAI Base URL), Cursor ignores `reasoning`/`reasoning_content` fields entirely.
+
+This was verified by testing DeepSeek R1 via OpenRouter directly in Cursor. Even though OpenRouter confirmed return of reasoning tokens via curl, Cursor did not display them.
+
+### Workarounds
+
+1. **Accept limitation**: Thinking works backend-side; just not visible in Cursor UI
+2. **Use curl/Postman**: Direct API calls show `reasoning` field correctly
+3. **M3 fallback**: Embed thinking in `content` field with `<think>` tags (visible as text)
+
+### Open Questions (Resolved)
+
+| Question | Answer |
+|----------|--------|
+| Does Cursor display `reasoning_content` for custom models? | ❌ No |
+| Does DeepSeek R1 via OpenRouter show thinking in Cursor? | ❌ No |
+| Is this a field name issue? | ❌ No - both `reasoning` and `reasoning_content` ignored |
 
 ---
 
