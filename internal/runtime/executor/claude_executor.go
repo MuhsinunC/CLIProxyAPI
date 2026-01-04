@@ -423,8 +423,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 
-		// Accumulate thinking content for caching
-		var thinkingAccum strings.Builder
+		// Track thinking blocks for signature capture (content not needed for cache)
 		var thinkingSignature string
 		inThinking := false
 		var pendingThinkingBlock string
@@ -439,7 +438,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
 			}
 
-			// Track thinking content from streaming events for caching
+			// Track thinking signature for caching (we don't need the actual thinking text)
 			if e.thinkingCache != nil && bytes.HasPrefix(line, []byte("data:")) {
 				eventData := bytes.TrimSpace(line[5:]) // Strip "data:" prefix and whitespace
 				eventType := gjson.GetBytes(eventData, "type").String()
@@ -449,23 +448,22 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					blockType := gjson.GetBytes(eventData, "content_block.type").String()
 					if blockType == "thinking" {
 						inThinking = true
-						thinkingAccum.Reset()
+						thinkingSignature = "" // Reset for new thinking block
 					}
 				case "content_block_delta":
 					if inThinking {
+						// Only capture signature, ignore thinking content
 						deltaType := gjson.GetBytes(eventData, "delta.type").String()
-						if deltaType == "thinking_delta" {
-							thinking := gjson.GetBytes(eventData, "delta.thinking").String()
-							thinkingAccum.WriteString(thinking)
-						} else if deltaType == "signature_delta" {
+						if deltaType == "signature_delta" {
 							thinkingSignature = gjson.GetBytes(eventData, "delta.signature").String()
 						}
 					}
 				case "content_block_stop":
-					if inThinking && thinkingAccum.Len() > 0 {
-						// Store thinking block, but don't cache yet - wait for tool_use detection
-						pendingThinkingBlock = fmt.Sprintf(`{"type":"thinking","thinking":%q,"signature":%q}`,
-							thinkingAccum.String(), thinkingSignature)
+					if inThinking && thinkingSignature != "" {
+						// Store ONLY the signature - Claude only needs this for tool loops
+						// The actual thinking text is not needed, saving 80-90% storage
+						pendingThinkingBlock = fmt.Sprintf(`{"type":"thinking","thinking":"","signature":%q}`,
+							thinkingSignature)
 						inThinking = false
 					}
 				case "message_stop":
