@@ -190,6 +190,7 @@ func (tc *ThinkingCache) Get(conversationID string) ([]byte, bool) {
 		tc.lruList.MoveToFront(elem)
 		entry := elem.Value.(*lruEntry)
 		entry.block.LastAccessed = time.Now().Unix()
+		fmt.Printf("[THINKING-CACHE] HIT (RAM): conversation=%s size=%d bytes\n", conversationID[:8], len(entry.block.ThinkingData))
 		return entry.block.ThinkingData, true
 	}
 
@@ -227,6 +228,7 @@ func (tc *ThinkingCache) Get(conversationID string) ([]byte, bool) {
 	// Update last_accessed in SQLite (async)
 	tc.writeChan <- block
 
+	fmt.Printf("[THINKING-CACHE] HIT (SQLite): conversation=%s size=%d bytes\n", conversationID[:8], len(thinkingData))
 	return thinkingData, true
 }
 
@@ -265,6 +267,8 @@ func (tc *ThinkingCache) Set(conversationID string, thinkingData []byte) {
 
 	// Async write to SQLite
 	tc.writeChan <- block
+
+	fmt.Printf("[THINKING-CACHE] STORE: conversation=%s size=%d bytes\n", conversationID[:8], len(thinkingData))
 }
 
 // evictIfNecessary removes LRU entries from RAM until there's room for newBytes.
