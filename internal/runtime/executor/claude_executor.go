@@ -148,6 +148,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Handle thinking in tool loops (inject cached blocks or disable thinking)
 	// (Claude requires thinking blocks before tool_use in assistant messages)
+	// Save original messages BEFORE modification for cache key generation
+	originalMessagesForCacheNonStream := gjson.GetBytes(body, "messages").Raw
 	if enableToolLoopThinkingCache {
 		body = e.handleToolLoopThinking(body)
 	}
@@ -242,7 +244,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	// Cache thinking blocks from response for future tool loop requests
-	e.cacheThinkingFromResponse(data, body)
+	// Use original messages (before any injection) for consistent cache key
+	e.cacheThinkingFromResponseWithMessages(data, originalMessagesForCacheNonStream)
 
 	var param any
 	out := sdktranslator.TranslateNonStream(
@@ -308,6 +311,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Handle thinking in tool loops (inject cached blocks or disable thinking)
 	// (Claude requires thinking blocks before tool_use in assistant messages)
+	// Save original messages BEFORE modification for cache key generation
+	originalMessagesForCache := gjson.GetBytes(body, "messages").Raw
 	if enableToolLoopThinkingCache {
 		body = e.handleToolLoopThinking(body)
 	}
@@ -422,7 +427,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		var thinkingAccum strings.Builder
 		var thinkingSignature string
 		inThinking := false
-		hasToolUse := false
 		var pendingThinkingBlock string
 
 		for scanner.Scan() {
@@ -446,8 +450,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					if blockType == "thinking" {
 						inThinking = true
 						thinkingAccum.Reset()
-					} else if blockType == "tool_use" {
-						hasToolUse = true
 					}
 				case "content_block_delta":
 					if inThinking {
@@ -469,12 +471,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				case "message_stop":
 					// Only cache if there was a tool_use in this response
 					if pendingThinkingBlock != "" {
-						if hasToolUse {
-							e.cacheThinkingFromStreamAccum(body, []byte(pendingThinkingBlock))
-							log.Debugf("[CLAUDE-EXECUTOR-STREAM] Cached thinking block (tool_use detected)")
-						} else {
-							log.Debugf("[CLAUDE-EXECUTOR-STREAM] Skipped caching (no tool_use in response)")
-						}
+						// Cache thinking for ALL responses (not just tool_use)
+						// This allows injecting into all assistants on future tool loop requests
+						e.cacheThinkingFromStreamAccumWithMessages(originalMessagesForCache, []byte(pendingThinkingBlock))
+						log.Debugf("[CLAUDE-EXECUTOR-STREAM] Cached thinking block for future use")
 					}
 				}
 			}
@@ -992,10 +992,9 @@ func (e *ClaudeExecutor) handleToolLoopThinking(payload []byte) []byte {
 	}
 
 	// We're in a tool loop - check if assistant messages have thinking blocks
-	// If any assistant message with tool_use lacks a thinking block, try to inject from cache
-	hasAssistantWithToolUse := false
-	allHaveThinking := true
-	lastAssistantIdxWithToolUse := -1
+	// Claude requires: if ANY assistant has thinking, ALL must have thinking first
+	// Track all assistants that lack thinking blocks
+	var assistantsWithoutThinking []int
 
 	msgArray := messages.Array()
 	for i, msg := range msgArray {
@@ -1008,59 +1007,74 @@ func (e *ClaudeExecutor) handleToolLoopThinking(payload []byte) []byte {
 			continue
 		}
 
-		hasToolUse := false
 		hasThinking := false
-
 		content.ForEach(func(_, block gjson.Result) bool {
 			blockType := block.Get("type").String()
-			if blockType == "tool_use" {
-				hasToolUse = true
-			}
 			if blockType == "thinking" || blockType == "redacted_thinking" {
 				hasThinking = true
+				return false // stop
 			}
 			return true
 		})
 
-		if hasToolUse {
-			hasAssistantWithToolUse = true
-			lastAssistantIdxWithToolUse = i
-			if !hasThinking {
-				allHaveThinking = false
-			}
+		if !hasThinking {
+			assistantsWithoutThinking = append(assistantsWithoutThinking, i)
 		}
 	}
 
 	// If all assistant messages already have thinking, no action needed
-	if !hasAssistantWithToolUse || allHaveThinking {
+	if len(assistantsWithoutThinking) == 0 {
 		return payload
 	}
 
-	// Try to inject cached thinking block
-	if e.thinkingCache != nil && lastAssistantIdxWithToolUse >= 0 {
-		// Generate conversation ID from message history (excluding last tool_result)
-		convID := cache.GenerateConversationID([]byte(messages.Raw))
+	// Try to inject cached thinking into ALL assistants that lack it
+	// For each assistant at index I, the cache key = hash(messages[0:I])
+	if e.thinkingCache == nil {
+		// Can't inject without cache, disable thinking
+		fmt.Printf("[THINKING-CACHE] SKIP: no cache available - disabling thinking\n")
+		payload, _ = sjson.DeleteBytes(payload, "thinking")
+		return payload
+	}
+
+	allInjected := true
+	for _, assistantIdx := range assistantsWithoutThinking {
+		// Generate stable cache key using message count + assistant index + user text content
+		// This is stable across JSON formatting variations between Cursor requests
+		convID := cache.GenerateStableConversationID([]byte(messages.Raw), assistantIdx)
 
 		if cachedThinking, found := e.thinkingCache.Get(convID); found {
 			// Parse the cached thinking block
 			thinkingBlock := gjson.ParseBytes(cachedThinking)
 			if thinkingBlock.Exists() {
-				// Inject thinking block at the beginning of the last assistant's content
-				assistantPath := fmt.Sprintf("messages.%d.content", lastAssistantIdxWithToolUse)
+				// Inject thinking block at the beginning of this assistant's content
+				assistantPath := fmt.Sprintf("messages.%d.content", assistantIdx)
 				existingContent := gjson.GetBytes(payload, assistantPath)
 				if existingContent.IsArray() {
 					// Prepend thinking block to content array
 					newContent := "[" + thinkingBlock.Raw + "," + existingContent.Raw[1:]
 					payload, _ = sjson.SetRawBytes(payload, assistantPath, []byte(newContent))
-					log.Debugf("[CLAUDE-EXECUTOR] Injected cached thinking block for conversation %s", convID)
-					return payload
+					fmt.Printf("[THINKING-CACHE] INJECT: msg[%d] conversation=%s size=%d bytes\n", assistantIdx, convID[:8], len(cachedThinking))
+				} else {
+					fmt.Printf("[THINKING-CACHE] MISS: msg[%d] conversation=%s - content not array\n", assistantIdx, convID[:8])
+					allInjected = false
 				}
+			} else {
+				fmt.Printf("[THINKING-CACHE] MISS: msg[%d] conversation=%s - invalid cached block\n", assistantIdx, convID[:8])
+				allInjected = false
 			}
+		} else {
+			fmt.Printf("[THINKING-CACHE] MISS: msg[%d] conversation=%s - not in cache\n", assistantIdx, convID[:8])
+			allInjected = false
 		}
-		log.Debugf("[CLAUDE-EXECUTOR] No cached thinking found for conversation %s, disabling thinking", convID)
 	}
 
-	// Fallback: disable thinking to avoid the Claude API error
+	if allInjected {
+		// Successfully injected into all assistants
+		return payload
+	}
+
+	// Failed to inject into some assistants - disable thinking to avoid API error
+	fmt.Printf("[THINKING-CACHE] FALLBACK: could not inject into all assistants - disabling thinking\n")
 	payload, _ = sjson.DeleteBytes(payload, "thinking")
 	return payload
 }
@@ -1103,6 +1117,42 @@ func (e *ClaudeExecutor) cacheThinkingFromResponse(responseBody []byte, requestP
 	log.Debugf("[CLAUDE-EXECUTOR] Cached thinking block for conversation %s (size=%d bytes)", convID, len(thinkingBlock.Raw))
 }
 
+// cacheThinkingFromResponseWithMessages extracts and caches thinking blocks using pre-extracted messages JSON.
+// This is used when we need to cache with the original messages (before any injection modifications).
+func (e *ClaudeExecutor) cacheThinkingFromResponseWithMessages(responseBody []byte, messagesJSON string) {
+	if e.thinkingCache == nil {
+		return
+	}
+	if messagesJSON == "" {
+		return
+	}
+
+	// Extract thinking block from response content
+	content := gjson.GetBytes(responseBody, "content")
+	if !content.IsArray() {
+		return
+	}
+
+	var thinkingBlock gjson.Result
+	content.ForEach(func(_, block gjson.Result) bool {
+		blockType := block.Get("type").String()
+		if blockType == "thinking" || blockType == "redacted_thinking" {
+			thinkingBlock = block
+			return false // stop, found it
+		}
+		return true
+	})
+
+	if !thinkingBlock.Exists() {
+		return // No thinking block in response
+	}
+
+	// At storage time, the assistant's index will be len(messages) - it's the next message after the request
+	assistantIdx := int(gjson.Get(messagesJSON, "#").Int())
+	convID := cache.GenerateStableConversationID([]byte(messagesJSON), assistantIdx)
+	e.thinkingCache.Set(convID, []byte(thinkingBlock.Raw))
+}
+
 // cacheThinkingFromStreamAccum caches a pre-built thinking block from streaming accumulation.
 // This is called after accumulating thinking_delta events in the streaming path.
 func (e *ClaudeExecutor) cacheThinkingFromStreamAccum(requestPayload []byte, thinkingBlock []byte) {
@@ -1116,7 +1166,25 @@ func (e *ClaudeExecutor) cacheThinkingFromStreamAccum(requestPayload []byte, thi
 		return
 	}
 
-	convID := cache.GenerateConversationID([]byte(messages.Raw))
+	// At storage time, the assistant's index will be len(messages) - it's the next message after the request
+	assistantIdx := int(gjson.GetBytes(requestPayload, "messages.#").Int())
+	convID := cache.GenerateStableConversationID([]byte(messages.Raw), assistantIdx)
 	e.thinkingCache.Set(convID, thinkingBlock)
 	log.Debugf("[CLAUDE-EXECUTOR-STREAM] Cached thinking block for conversation %s (size=%d bytes)", convID, len(thinkingBlock))
+}
+
+// cacheThinkingFromStreamAccumWithMessages caches a thinking block using pre-extracted messages JSON.
+// This is used when we need to cache with the original messages (before any injection modifications).
+func (e *ClaudeExecutor) cacheThinkingFromStreamAccumWithMessages(messagesJSON string, thinkingBlock []byte) {
+	if e.thinkingCache == nil {
+		return
+	}
+	if messagesJSON == "" {
+		return
+	}
+
+	// At storage time, the assistant's index will be len(messages) - it's the next message after the request
+	assistantIdx := int(gjson.Get(messagesJSON, "#").Int())
+	convID := cache.GenerateStableConversationID([]byte(messagesJSON), assistantIdx)
+	e.thinkingCache.Set(convID, thinkingBlock)
 }

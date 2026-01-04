@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/tidwall/gjson"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -310,6 +312,46 @@ func (tc *ThinkingCache) Stats() (ramEntries int, ramBytes int64, maxBytes int64
 func GenerateConversationID(messages []byte) string {
 	hash := sha256.Sum256(messages)
 	return hex.EncodeToString(hash[:8]) // 8 bytes = 64 bits = 16 hex chars
+}
+
+// GenerateStableConversationID creates a conversation ID that's stable across
+// JSON formatting variations. It hashes the assistant index + user text content
+// BEFORE that assistant (indices 0 to assistantIdx-1).
+// This fixes the issue where Cursor may format the same message differently
+// between requests, causing cache key mismatches.
+func GenerateStableConversationID(messages []byte, assistantIdx int) string {
+	// Hash user message text content ONLY for messages BEFORE this assistant
+	// This creates a stable key: same user content + same position = same key
+	var userContent strings.Builder
+	userContent.WriteString(fmt.Sprintf("idx:%d|", assistantIdx))
+
+	messagesArray := gjson.GetBytes(messages, "@this")
+	if messagesArray.IsArray() {
+		for i, msg := range messagesArray.Array() {
+			if i >= assistantIdx {
+				break // Only consider messages BEFORE this assistant
+			}
+			if msg.Get("role").String() == "user" {
+				content := msg.Get("content")
+				if content.IsArray() {
+					// Content is array of blocks - extract text
+					content.ForEach(func(_, block gjson.Result) bool {
+						if block.Get("type").String() == "text" {
+							userContent.WriteString(block.Get("text").String())
+						}
+						return true
+					})
+				} else {
+					// Content is a simple string
+					userContent.WriteString(content.String())
+				}
+				userContent.WriteString("|")
+			}
+		}
+	}
+
+	hash := sha256.Sum256([]byte(userContent.String()))
+	return hex.EncodeToString(hash[:8])
 }
 
 // GenerateConversationIDFromMessages creates a conversation ID from message history.
