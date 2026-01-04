@@ -109,6 +109,9 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// ThinkingCache configures the RAM + SQLite cache for Claude thinking blocks.
+	ThinkingCache ThinkingCacheConfig `yaml:"thinking-cache" json:"thinking-cache"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -248,23 +251,15 @@ type PayloadModelRule struct {
 	Protocol string `yaml:"protocol" json:"protocol"`
 }
 
-// CloakConfig configures request cloaking for non-Claude-Code clients.
-// Cloaking disguises API requests to appear as originating from the official Claude Code CLI.
-type CloakConfig struct {
-	// Mode controls cloaking behavior: "auto" (default), "always", or "never".
-	// - "auto": cloak only when client is not Claude Code (based on User-Agent)
-	// - "always": always apply cloaking regardless of client
-	// - "never": never apply cloaking
-	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
-
-	// StrictMode controls how system prompts are handled when cloaking.
-	// - false (default): prepend Claude Code prompt to user system messages
-	// - true: strip all user system messages, keep only Claude Code prompt
-	StrictMode bool `yaml:"strict-mode,omitempty" json:"strict-mode,omitempty"`
-
-	// SensitiveWords is a list of words to obfuscate with zero-width characters.
-	// This can help bypass certain content filters.
-	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+// ThinkingCacheConfig holds configuration for the Claude thinking block cache.
+// This cache enables tool loops with extended thinking by persisting thinking blocks.
+type ThinkingCacheConfig struct {
+	// Enabled toggles the thinking block cache on or off.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// MaxMemoryMB is the maximum RAM allocated for the cache (default 512MB).
+	MaxMemoryMB int `yaml:"max-memory-mb" json:"max-memory-mb"`
+	// SQLitePath is the path to the SQLite file for persistence.
+	SQLitePath string `yaml:"sqlite-path" json:"sqlite-path"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,

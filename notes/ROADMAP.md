@@ -9,7 +9,7 @@
 | Milestone | Status | Priority |
 |-----------|--------|----------|
 | [M1: Thinking Display in Cursor](#m1-thinking-display-in-cursor) | ❌ Blocked (Cursor Limitation) | Low |
-| [M2: Thinking Block Caching](#m2-thinking-block-caching) | ⚪ Planned | High |
+| [M2: Thinking Block Caching](#m2-thinking-block-caching) | ✅ Complete | High |
 | [M3: Content-Embedded Fallback](#m3-content-embedded-fallback) | ⚪ Planned | Medium |
 
 ---
@@ -67,7 +67,7 @@ This was verified by testing DeepSeek R1 via OpenRouter directly in Cursor. Even
 
 **Goal**: Cache thinking blocks server-side to enable tool loops without errors.
 
-**Status**: 🟡 In Progress
+**Status**: ✅ **Complete** (January 2026)
 
 ### Why Caching?
 
@@ -146,15 +146,16 @@ CREATE INDEX idx_last_accessed ON thinking_cache(last_accessed DESC);
 ### Tasks
 
 - [x] Design RAM + SQLite architecture
-- [ ] Add config struct and YAML parsing
-- [ ] Create RAM cache with LRU eviction
-- [ ] Implement SQLite read/write layer
-- [ ] Implement async write goroutine
-- [ ] Load top N entries on startup
-- [ ] Implement conversation ID generation (request hash)
-- [ ] Modify request translator to inject cached thinking blocks
-- [ ] Modify response translator to cache thinking blocks
-- [ ] Add tests
+- [x] Add config struct (`ThinkingCacheConfig` in config.go)
+- [x] Create RAM cache with LRU eviction (`internal/cache/thinking_cache.go`)
+- [x] Implement SQLite read/write layer
+- [x] Implement async write goroutine
+- [x] Load top N entries on startup
+- [x] Implement conversation ID generation (request hash)
+- [x] Create `handleToolLoopThinking` method (inject cached blocks)
+- [x] Create `cacheThinkingFromResponse` method (extract and cache)
+- [x] Hook response caching into streaming path (`cacheThinkingFromStreamAccum`)
+- [x] End-to-end testing with tool loops
 
 ### Memory Estimation
 

@@ -15,6 +15,7 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -32,19 +33,27 @@ import (
 // ClaudeExecutor is a stateless executor for Anthropic Claude over the messages API.
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type ClaudeExecutor struct {
-	cfg *config.Config
+	cfg           *config.Config
+	thinkingCache *cache.ThinkingCache
 }
 
 const claudeToolPrefix = "proxy_"
 
-func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
+func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor {
+	// Initialize thinking cache if configured
+	thinkingCache, err := cache.NewThinkingCache(cfg.ThinkingCache)
+	if err != nil {
+		log.Warnf("[CLAUDE-EXECUTOR] Failed to initialize thinking cache: %v", err)
+	}
+	return &ClaudeExecutor{cfg: cfg, thinkingCache: thinkingCache}
+}
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
 
-// enableToolLoopThinkingDisable controls whether we automatically disable thinking
-// when a tool loop is detected (missing thinking blocks in assistant messages).
-// Set to false to disable this workaround and let the Claude API error surface.
-const enableToolLoopThinkingDisable = false
+// enableToolLoopThinkingCache controls whether we use the thinking cache to inject
+// cached thinking blocks in tool loops. When disabled, we fallback to disabling thinking.
+// Set to true to enable cached thinking blocks across tool loops.
+const enableToolLoopThinkingCache = true
 
 // PrepareRequest injects Claude credentials into the outgoing HTTP request.
 func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
@@ -137,10 +146,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		fmt.Printf("[CLAUDE-EXECUTOR] THINKING: NOT ENABLED for model=%s\n", req.Model)
 	}
 
-	// Disable thinking if in a tool loop without cached thinking blocks
+	// Handle thinking in tool loops (inject cached blocks or disable thinking)
 	// (Claude requires thinking blocks before tool_use in assistant messages)
-	if enableToolLoopThinkingDisable {
-		body = disableThinkingInToolLoop(body)
+	if enableToolLoopThinkingCache {
+		body = e.handleToolLoopThinking(body)
 	}
 
 	// Log if thinking was disabled by tool loop detection
@@ -231,6 +240,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if isClaudeOAuthToken(apiKey) {
 		data = stripClaudeToolPrefixFromResponse(data, claudeToolPrefix)
 	}
+
+	// Cache thinking blocks from response for future tool loop requests
+	e.cacheThinkingFromResponse(data, body)
+
 	var param any
 	out := sdktranslator.TranslateNonStream(
 		ctx,
@@ -293,10 +306,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		fmt.Printf("[CLAUDE-EXECUTOR-STREAM] THINKING: NOT ENABLED for model=%s\n", req.Model)
 	}
 
-	// Disable thinking if in a tool loop without cached thinking blocks
+	// Handle thinking in tool loops (inject cached blocks or disable thinking)
 	// (Claude requires thinking blocks before tool_use in assistant messages)
-	if enableToolLoopThinkingDisable {
-		body = disableThinkingInToolLoop(body)
+	if enableToolLoopThinkingCache {
+		body = e.handleToolLoopThinking(body)
 	}
 
 	// Log if thinking was disabled by tool loop detection
@@ -404,6 +417,14 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		scanner := bufio.NewScanner(decodedBody)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+
+		// Accumulate thinking content for caching
+		var thinkingAccum strings.Builder
+		var thinkingSignature string
+		inThinking := false
+		hasToolUse := false
+		var pendingThinkingBlock string
+
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
@@ -413,6 +434,51 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if isClaudeOAuthToken(apiKey) {
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
 			}
+
+			// Track thinking content from streaming events for caching
+			if e.thinkingCache != nil && bytes.HasPrefix(line, []byte("data:")) {
+				eventData := bytes.TrimSpace(line[5:]) // Strip "data:" prefix and whitespace
+				eventType := gjson.GetBytes(eventData, "type").String()
+
+				switch eventType {
+				case "content_block_start":
+					blockType := gjson.GetBytes(eventData, "content_block.type").String()
+					if blockType == "thinking" {
+						inThinking = true
+						thinkingAccum.Reset()
+					} else if blockType == "tool_use" {
+						hasToolUse = true
+					}
+				case "content_block_delta":
+					if inThinking {
+						deltaType := gjson.GetBytes(eventData, "delta.type").String()
+						if deltaType == "thinking_delta" {
+							thinking := gjson.GetBytes(eventData, "delta.thinking").String()
+							thinkingAccum.WriteString(thinking)
+						} else if deltaType == "signature_delta" {
+							thinkingSignature = gjson.GetBytes(eventData, "delta.signature").String()
+						}
+					}
+				case "content_block_stop":
+					if inThinking && thinkingAccum.Len() > 0 {
+						// Store thinking block, but don't cache yet - wait for tool_use detection
+						pendingThinkingBlock = fmt.Sprintf(`{"type":"thinking","thinking":%q,"signature":%q}`,
+							thinkingAccum.String(), thinkingSignature)
+						inThinking = false
+					}
+				case "message_stop":
+					// Only cache if there was a tool_use in this response
+					if pendingThinkingBlock != "" {
+						if hasToolUse {
+							e.cacheThinkingFromStreamAccum(body, []byte(pendingThinkingBlock))
+							log.Debugf("[CLAUDE-EXECUTOR-STREAM] Cached thinking block (tool_use detected)")
+						} else {
+							log.Debugf("[CLAUDE-EXECUTOR-STREAM] Skipped caching (no tool_use in response)")
+						}
+					}
+				}
+			}
+
 			chunks := sdktranslator.TranslateStream(
 				ctx,
 				to,
@@ -879,12 +945,13 @@ func stripClaudeToolPrefixFromStreamLine(line []byte, prefix string) []byte {
 	return updated
 }
 
-// disableThinkingInToolLoop detects if we're in a "tool loop" (last user message contains tool_result)
-// and the assistant messages don't have thinking blocks. In this case, Claude API requires thinking
-// blocks before tool_use content, but OpenAI-format clients like Cursor don't send them.
-// The workaround is to temporarily disable thinking to allow the tool loop to complete.
-// This matches cursor-claude-connector's fallback approach when cached thinking blocks are unavailable.
-func disableThinkingInToolLoop(payload []byte) []byte {
+// handleToolLoopThinking handles thinking blocks in tool loop scenarios.
+// It detects if we're in a tool loop (last user message contains tool_result) and:
+// 1. If cached thinking blocks exist, injects them into assistant messages
+// 2. If no cache hit, falls back to disabling thinking (to avoid Claude API errors)
+// This enables Claude extended thinking to work across tool loops even when
+// clients like Cursor don't forward reasoning_content.
+func (e *ClaudeExecutor) handleToolLoopThinking(payload []byte) []byte {
 	// Check if thinking is enabled
 	thinkingType := gjson.GetBytes(payload, "thinking.type").String()
 	if thinkingType != "enabled" {
@@ -925,18 +992,20 @@ func disableThinkingInToolLoop(payload []byte) []byte {
 	}
 
 	// We're in a tool loop - check if assistant messages have thinking blocks
-	// If any assistant message with tool_use lacks a thinking block, disable thinking
+	// If any assistant message with tool_use lacks a thinking block, try to inject from cache
 	hasAssistantWithToolUse := false
 	allHaveThinking := true
+	lastAssistantIdxWithToolUse := -1
 
-	messages.ForEach(func(_, msg gjson.Result) bool {
+	msgArray := messages.Array()
+	for i, msg := range msgArray {
 		if msg.Get("role").String() != "assistant" {
-			return true
+			continue
 		}
 
 		content := msg.Get("content")
 		if !content.IsArray() {
-			return true
+			continue
 		}
 
 		hasToolUse := false
@@ -955,19 +1024,99 @@ func disableThinkingInToolLoop(payload []byte) []byte {
 
 		if hasToolUse {
 			hasAssistantWithToolUse = true
+			lastAssistantIdxWithToolUse = i
 			if !hasThinking {
 				allHaveThinking = false
-				return false // stop iteration
 			}
+		}
+	}
+
+	// If all assistant messages already have thinking, no action needed
+	if !hasAssistantWithToolUse || allHaveThinking {
+		return payload
+	}
+
+	// Try to inject cached thinking block
+	if e.thinkingCache != nil && lastAssistantIdxWithToolUse >= 0 {
+		// Generate conversation ID from message history (excluding last tool_result)
+		convID := cache.GenerateConversationID([]byte(messages.Raw))
+
+		if cachedThinking, found := e.thinkingCache.Get(convID); found {
+			// Parse the cached thinking block
+			thinkingBlock := gjson.ParseBytes(cachedThinking)
+			if thinkingBlock.Exists() {
+				// Inject thinking block at the beginning of the last assistant's content
+				assistantPath := fmt.Sprintf("messages.%d.content", lastAssistantIdxWithToolUse)
+				existingContent := gjson.GetBytes(payload, assistantPath)
+				if existingContent.IsArray() {
+					// Prepend thinking block to content array
+					newContent := "[" + thinkingBlock.Raw + "," + existingContent.Raw[1:]
+					payload, _ = sjson.SetRawBytes(payload, assistantPath, []byte(newContent))
+					log.Debugf("[CLAUDE-EXECUTOR] Injected cached thinking block for conversation %s", convID)
+					return payload
+				}
+			}
+		}
+		log.Debugf("[CLAUDE-EXECUTOR] No cached thinking found for conversation %s, disabling thinking", convID)
+	}
+
+	// Fallback: disable thinking to avoid the Claude API error
+	payload, _ = sjson.DeleteBytes(payload, "thinking")
+	return payload
+}
+
+// cacheThinkingFromResponse extracts and caches thinking blocks from a Claude response.
+// This is called after receiving a response to cache thinking for future tool loop requests.
+func (e *ClaudeExecutor) cacheThinkingFromResponse(responseBody []byte, requestPayload []byte) {
+	if e.thinkingCache == nil {
+		return
+	}
+
+	// Extract thinking block from response content
+	content := gjson.GetBytes(responseBody, "content")
+	if !content.IsArray() {
+		return
+	}
+
+	var thinkingBlock gjson.Result
+	content.ForEach(func(_, block gjson.Result) bool {
+		blockType := block.Get("type").String()
+		if blockType == "thinking" || blockType == "redacted_thinking" {
+			thinkingBlock = block
+			return false // stop, found it
 		}
 		return true
 	})
 
-	// If we found assistant messages with tool_use but without thinking blocks,
-	// disable thinking to avoid the Claude API error
-	if hasAssistantWithToolUse && !allHaveThinking {
-		payload, _ = sjson.DeleteBytes(payload, "thinking")
+	if !thinkingBlock.Exists() {
+		return // No thinking block in response
 	}
 
-	return payload
+	// Generate conversation ID from request messages
+	messages := gjson.GetBytes(requestPayload, "messages")
+	if !messages.Exists() {
+		return
+	}
+
+	convID := cache.GenerateConversationID([]byte(messages.Raw))
+	e.thinkingCache.Set(convID, []byte(thinkingBlock.Raw))
+	log.Debugf("[CLAUDE-EXECUTOR] Cached thinking block for conversation %s (size=%d bytes)", convID, len(thinkingBlock.Raw))
+}
+
+// cacheThinkingFromStreamAccum caches a pre-built thinking block from streaming accumulation.
+// This is called after accumulating thinking_delta events in the streaming path.
+func (e *ClaudeExecutor) cacheThinkingFromStreamAccum(requestPayload []byte, thinkingBlock []byte) {
+	if e.thinkingCache == nil {
+		return
+	}
+
+	// Generate conversation ID from request messages
+	messages := gjson.GetBytes(requestPayload, "messages")
+	if !messages.Exists() {
+		return
+	}
+
+	convID := cache.GenerateConversationID([]byte(messages.Raw))
+	e.thinkingCache.Set(convID, thinkingBlock)
+	log.Debugf("[CLAUDE-EXECUTOR-STREAM] Cached thinking block for conversation %s (size=%d bytes)", convID, len(thinkingBlock))
 }
