@@ -11,6 +11,7 @@
 | [M1: Thinking Display in Cursor](#m1-thinking-display-in-cursor) | ❌ Blocked (Cursor Limitation) | Low |
 | [M2: Thinking Block Caching](#m2-thinking-block-caching) | ✅ Complete | High |
 | [M3: Content-Embedded Fallback](#m3-content-embedded-fallback) | ⚪ Planned | Medium |
+| [M4: Antigravity Thinking Budget Control](#m4-antigravity-thinking-budget-control) | ⚠️ Testing Required | High |
 
 ---
 
@@ -228,6 +229,67 @@ Claude's API automatically strips `thinking` blocks from previous turns. This me
 The request translator (`claude_openai_request.go`) does NOT convert `reasoning_content` from incoming requests into Claude's native thinking blocks. It only handles text, tool_calls, and images.
 
 **Implication**: Caching the original Claude-format thinking block (with signature) is required.
+
+---
+
+## M4: Antigravity Thinking Budget Control
+
+**Goal**: Explicitly control thinking budget tokens for Claude Opus 4.5 via Antigravity API.
+
+**Status**: ⚠️ **Partially Researched** - Testing Required
+
+### Research Findings
+
+#### What We Know: Client-Side Translation
+
+Our proxy translates thinking budget from OpenAI format to Antigravity format:
+
+| Input Format | Antigravity Output |
+|--------------|-------------------|
+| `thinking.budget_tokens: 16384` | `thinkingConfig.thinkingBudget: 16384` |
+| `reasoning_effort: "high"` | Mapped to high budget value |
+| (none) | `thinkingBudget: -1` (dynamic) |
+
+Code: [antigravity_openai_request.go#L73-85](file:///Users/user/Documents/Muhsinun/Projects/GitHub/CLIProxyAPI/internal/translator/antigravity/openai/chat-completions/antigravity_openai_request.go#L73-L85)
+
+#### Antigravity Server-Side Behavior (for Gemini models)
+
+- `thinkingBudget=-1` → Dynamic mode, **capped at 8192 tokens**
+- Custom values → Respected as **upper limit**
+- `thinkingBudget=0` → Disables thinking
+
+Source: [Google AI documentation](https://ai.google.dev/gemini-api/docs/thinking)
+
+#### The Unknown: Claude Models via Antigravity
+
+**We don't know if Antigravity's backend respects thinkingBudget for Claude models.**
+
+Antigravity routes `gemini-claude-opus-4-5-thinking` to Claude, but:
+- Does it pass through `thinkingBudget`?
+- Or does it use server-side defaults for Claude?
+- Claude's native API uses `thinking.budget_tokens`, not `thinkingConfig.thinkingBudget`
+
+**This requires testing to verify.**
+
+### Example Request (Correct Model Name)
+
+```json
+{
+  "model": "gemini-claude-opus-4-5-thinking",
+  "thinking": {
+    "type": "enabled",
+    "budget_tokens": 16384
+  },
+  "max_tokens": 32768,
+  "messages": [...]
+}
+```
+
+### Testing Required
+
+1. Send requests with different `budget_tokens` values
+2. Compare `reasoning_tokens` in response vs requested budget
+3. Check if budget correlates with token usage
 
 ---
 
