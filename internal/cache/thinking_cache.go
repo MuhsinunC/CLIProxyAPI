@@ -21,6 +21,14 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+// Singleton instance for ThinkingCache - one cache per process is sufficient
+// since all executors use the same SQLite database
+var (
+	thinkingCacheInstance *ThinkingCache
+	thinkingCacheOnce     sync.Once
+	thinkingCacheErr      error
+)
+
 // ThinkingBlock represents a cached Claude thinking block with signature.
 type ThinkingBlock struct {
 	ConversationID string `json:"conversation_id"`
@@ -56,9 +64,17 @@ type lruEntry struct {
 	block *ThinkingBlock
 }
 
-// NewThinkingCache creates a new thinking cache with the given configuration.
-// It opens/creates the SQLite database and loads existing entries into RAM.
-func NewThinkingCache(cfg config.ThinkingCacheConfig) (*ThinkingCache, error) {
+// GetThinkingCache returns the singleton ThinkingCache instance.
+// Only creates the cache on first call; subsequent calls return the same instance.
+func GetThinkingCache(cfg config.ThinkingCacheConfig) (*ThinkingCache, error) {
+	thinkingCacheOnce.Do(func() {
+		thinkingCacheInstance, thinkingCacheErr = newThinkingCache(cfg)
+	})
+	return thinkingCacheInstance, thinkingCacheErr
+}
+
+// newThinkingCache creates a new thinking cache (internal, called by GetThinkingCache).
+func newThinkingCache(cfg config.ThinkingCacheConfig) (*ThinkingCache, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
@@ -110,6 +126,7 @@ func NewThinkingCache(cfg config.ThinkingCacheConfig) (*ThinkingCache, error) {
 		fmt.Printf("[THINKING-CACHE] Warning: failed to load from SQLite: %v\n", err)
 	}
 
+	// Log cache initialization (singleton ensures this only runs once)
 	fmt.Printf("[THINKING-CACHE] Initialized: max_memory=%dMB, sqlite=%s, loaded=%d entries (%.2f MB)\n",
 		cfg.MaxMemoryMB, cfg.SQLitePath, tc.lruList.Len(), float64(tc.usedBytes)/(1024*1024))
 

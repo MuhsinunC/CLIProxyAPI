@@ -111,7 +111,6 @@ func (w *Watcher) Start(ctx context.Context) error {
 	return w.start(ctx)
 }
 
-// Stop stops the file watcher
 func (w *Watcher) Stop() error {
 	w.stopDispatch()
 	w.stopConfigReloadTimer()

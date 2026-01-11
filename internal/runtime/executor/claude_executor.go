@@ -40,8 +40,8 @@ type ClaudeExecutor struct {
 const claudeToolPrefix = "proxy_"
 
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor {
-	// Initialize thinking cache if configured
-	thinkingCache, err := cache.NewThinkingCache(cfg.ThinkingCache)
+	// Get singleton thinking cache instance
+	thinkingCache, err := cache.GetThinkingCache(cfg.ThinkingCache)
 	if err != nil {
 		log.Warnf("[CLAUDE-EXECUTOR] Failed to initialize thinking cache: %v", err)
 	}

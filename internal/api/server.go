@@ -6,6 +6,7 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -41,6 +42,12 @@ import (
 )
 
 const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
+
+// Deduplicate UpdateClients calls - skip all work if config unchanged
+var (
+	lastAppliedConfigHash string
+	updateClientsMu       sync.Mutex
+)
 
 type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
@@ -854,6 +861,18 @@ func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) {
 //   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
 func (s *Server) UpdateClients(cfg *config.Config) {
+	// Hash-based deduplication: skip if config identical to last applied
+	cfgYaml, _ := yaml.Marshal(cfg)
+	cfgHash := fmt.Sprintf("%x", sha256.Sum256(cfgYaml))
+
+	updateClientsMu.Lock()
+	if cfgHash == lastAppliedConfigHash {
+		updateClientsMu.Unlock()
+		return // Config unchanged, skip all work
+	}
+	lastAppliedConfigHash = cfgHash
+	updateClientsMu.Unlock()
+
 	// Reconstruct old config from YAML snapshot to avoid reference sharing issues
 	var oldCfg *config.Config
 	if len(s.oldConfigYaml) > 0 {
