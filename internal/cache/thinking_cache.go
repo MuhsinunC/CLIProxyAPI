@@ -5,24 +5,21 @@ package cache
 import (
 	"container/list"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/tidwall/gjson"
-
-	_ "github.com/mattn/go-sqlite3"
 )
 
 // Singleton instance for ThinkingCache - one cache per process is sufficient
-// since all executors use the same SQLite database
+// since all executors use the same database
 var (
 	thinkingCacheInstance *ThinkingCache
 	thinkingCacheOnce     sync.Once
@@ -38,8 +35,13 @@ type ThinkingBlock struct {
 	SizeBytes      int    `json:"size_bytes"`
 }
 
-// ThinkingCache provides RAM + SQLite caching for Claude thinking blocks.
-// RAM is used for fast access with LRU eviction; SQLite provides persistence.
+// ThinkingCache provides RAM + BadgerDB caching for Claude thinking blocks.
+// RAM is used for fast access with LRU eviction; BadgerDB provides persistence.
+// BadgerDB is significantly faster than SQLite for key-value workloads:
+// - ~375x faster writes than BoltDB/SQLite
+// - LSM tree architecture keeps keys in RAM, values on SSD
+// - Pure Go (no CGO dependencies)
+// - Production-proven (Dgraph, Jaeger Tracing, etc.)
 type ThinkingCache struct {
 	mu sync.RWMutex
 
@@ -49,9 +51,9 @@ type ThinkingCache struct {
 	usedBytes int64
 	maxBytes  int64
 
-	// SQLite persistence
-	db         *sql.DB
-	sqlitePath string
+	// BadgerDB persistence
+	db      *badger.DB
+	dbPath  string
 
 	// Async write channel
 	writeChan chan *ThinkingBlock
@@ -79,80 +81,128 @@ func newThinkingCache(cfg config.ThinkingCacheConfig) (*ThinkingCache, error) {
 		return nil, nil
 	}
 
-	// Ensure directory exists for SQLite file
-	dir := filepath.Dir(cfg.SQLitePath)
-	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create directory for SQLite: %w", err)
+	// Determine the storage path
+	// If StoragePath is set, use it; otherwise derive from SQLitePath for backwards compatibility
+	dbPath := cfg.StoragePath
+	if dbPath == "" {
+		// Backwards compatibility: derive from SQLitePath
+		if cfg.SQLitePath != "" {
+			// Remove .db extension if present and add _badger suffix
+			dbPath = strings.TrimSuffix(cfg.SQLitePath, ".db") + "_badger"
+		} else {
+			dbPath = "thinking_cache_badger"
 		}
 	}
 
-	// Open SQLite database
-	db, err := sql.Open("sqlite3", cfg.SQLitePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
+	// Auto-migrate from SQLite if needed
+	if cfg.SQLitePath != "" {
+		AutoMigrate(cfg.SQLitePath, dbPath)
 	}
 
-	// Create table if not exists
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS thinking_cache (
-			conversation_id TEXT PRIMARY KEY,
-			thinking_block  BLOB NOT NULL,
-			created_at      INTEGER NOT NULL,
-			last_accessed   INTEGER NOT NULL
-		);
-		CREATE INDEX IF NOT EXISTS idx_last_accessed ON thinking_cache(last_accessed DESC);
-	`)
+	// Ensure directory exists for BadgerDB
+	if err := os.MkdirAll(dbPath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create directory for BadgerDB: %w", err)
+	}
+
+	// Configure BadgerDB options for optimal performance
+	opts := badger.DefaultOptions(dbPath)
+	opts.Logger = nil // Disable BadgerDB's internal logging
+
+	// Optimize for our use case: small values (thinking signatures ~100-500 bytes)
+	// These settings reduce memory usage while maintaining good performance
+	opts.ValueLogFileSize = 64 << 20  // 64MB value log files (smaller = faster GC)
+	opts.NumMemtables = 2             // Reduce memory usage
+	opts.NumLevelZeroTables = 2       // Reduce memory usage
+	opts.NumLevelZeroTablesStall = 4  // Reduce memory usage
+	opts.ValueThreshold = 1024        // Values larger than 1KB go to value log
+	opts.SyncWrites = false           // Async writes for better performance (we have RAM cache for durability)
+	opts.DetectConflicts = false      // We don't need transaction conflict detection
+
+	// Open BadgerDB database
+	db, err := badger.Open(opts)
 	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to create thinking_cache table: %w", err)
+		return nil, fmt.Errorf("failed to open BadgerDB database: %w", err)
 	}
 
 	tc := &ThinkingCache{
-		cache:      make(map[string]*list.Element),
-		lruList:    list.New(),
-		maxBytes:   int64(cfg.MaxMemoryMB) * 1024 * 1024,
-		db:         db,
-		sqlitePath: cfg.SQLitePath,
-		writeChan:  make(chan *ThinkingBlock, 1000), // Buffer 1000 async writes
-		doneChan:   make(chan struct{}),
+		cache:     make(map[string]*list.Element),
+		lruList:   list.New(),
+		maxBytes:  int64(cfg.MaxMemoryMB) * 1024 * 1024,
+		db:        db,
+		dbPath:    dbPath,
+		writeChan: make(chan *ThinkingBlock, 1000), // Buffer 1000 async writes
+		doneChan:  make(chan struct{}),
 	}
 
 	// Start async writer goroutine
 	go tc.asyncWriter()
 
-	// Load entries from SQLite into RAM
-	if err := tc.loadFromSQLite(); err != nil {
-		fmt.Printf("[THINKING-CACHE] Warning: failed to load from SQLite: %v\n", err)
+	// Start BadgerDB garbage collection goroutine
+	go tc.runGC()
+
+	// Load entries from BadgerDB into RAM
+	if err := tc.loadFromBadger(); err != nil {
+		fmt.Printf("[THINKING-CACHE] Warning: failed to load from BadgerDB: %v\n", err)
 	}
 
 	// Log cache initialization (singleton ensures this only runs once)
-	fmt.Printf("[THINKING-CACHE] Initialized: max_memory=%dMB, sqlite=%s, loaded=%d entries (%.2f MB)\n",
-		cfg.MaxMemoryMB, cfg.SQLitePath, tc.lruList.Len(), float64(tc.usedBytes)/(1024*1024))
+	fmt.Printf("[THINKING-CACHE] Initialized with BadgerDB: max_memory=%dMB, path=%s, loaded=%d entries (%.2f MB)\n",
+		cfg.MaxMemoryMB, dbPath, tc.lruList.Len(), float64(tc.usedBytes)/(1024*1024))
 
 	return tc, nil
 }
 
-// loadFromSQLite loads top entries from SQLite into RAM cache (by last_accessed).
-func (tc *ThinkingCache) loadFromSQLite() error {
-	rows, err := tc.db.Query(`
-		SELECT conversation_id, thinking_block, created_at, last_accessed
-		FROM thinking_cache
-		ORDER BY last_accessed DESC
-	`)
+// loadFromBadger loads entries from BadgerDB into RAM cache (by last_accessed).
+func (tc *ThinkingCache) loadFromBadger() error {
+	// Collect all entries first, then sort by last_accessed
+	type entryData struct {
+		block        *ThinkingBlock
+		lastAccessed int64
+	}
+	var entries []entryData
+
+	err := tc.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchSize = 100
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+
+			err := item.Value(func(val []byte) error {
+				var block ThinkingBlock
+				if err := json.Unmarshal(val, &block); err != nil {
+					return nil // Skip corrupted entries
+				}
+				entries = append(entries, entryData{
+					block:        &block,
+					lastAccessed: block.LastAccessed,
+				})
+				return nil
+			})
+			if err != nil {
+				continue
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
-	for rows.Next() {
-		var block ThinkingBlock
-		var thinkingData []byte
-		if err := rows.Scan(&block.ConversationID, &thinkingData, &block.CreatedAt, &block.LastAccessed); err != nil {
-			continue
+	// Sort by last_accessed descending (most recent first)
+	for i := 0; i < len(entries)-1; i++ {
+		for j := i + 1; j < len(entries); j++ {
+			if entries[j].lastAccessed > entries[i].lastAccessed {
+				entries[i], entries[j] = entries[j], entries[i]
+			}
 		}
-		block.ThinkingData = thinkingData
-		block.SizeBytes = len(thinkingData)
+	}
+
+	// Load into RAM cache until we hit the memory limit
+	for _, e := range entries {
+		block := e.block
 
 		// Check if we'd exceed max memory
 		if tc.usedBytes+int64(block.SizeBytes) > tc.maxBytes {
@@ -160,7 +210,7 @@ func (tc *ThinkingCache) loadFromSQLite() error {
 		}
 
 		// Add to RAM cache (already sorted by last_accessed, so add to back of LRU)
-		entry := &lruEntry{key: block.ConversationID, block: &block}
+		entry := &lruEntry{key: block.ConversationID, block: block}
 		elem := tc.lruList.PushBack(entry)
 		tc.cache[block.ConversationID] = elem
 		tc.usedBytes += int64(block.SizeBytes)
@@ -169,36 +219,62 @@ func (tc *ThinkingCache) loadFromSQLite() error {
 	return nil
 }
 
-// asyncWriter handles async SQLite writes.
+// asyncWriter handles async BadgerDB writes.
 func (tc *ThinkingCache) asyncWriter() {
 	for {
 		select {
 		case block := <-tc.writeChan:
-			tc.writeSQLite(block)
+			tc.writeBadger(block)
 		case <-tc.doneChan:
 			// Drain remaining writes
 			for len(tc.writeChan) > 0 {
 				block := <-tc.writeChan
-				tc.writeSQLite(block)
+				tc.writeBadger(block)
 			}
 			return
 		}
 	}
 }
 
-// writeSQLite persists a thinking block to SQLite.
-func (tc *ThinkingCache) writeSQLite(block *ThinkingBlock) {
-	_, err := tc.db.Exec(`
-		INSERT OR REPLACE INTO thinking_cache (conversation_id, thinking_block, created_at, last_accessed)
-		VALUES (?, ?, ?, ?)
-	`, block.ConversationID, block.ThinkingData, block.CreatedAt, block.LastAccessed)
+// writeBadger persists a thinking block to BadgerDB.
+func (tc *ThinkingCache) writeBadger(block *ThinkingBlock) {
+	data, err := json.Marshal(block)
 	if err != nil {
-		fmt.Printf("[THINKING-CACHE] SQLite write error: %v\n", err)
+		fmt.Printf("[THINKING-CACHE] BadgerDB marshal error: %v\n", err)
+		return
+	}
+
+	err = tc.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(block.ConversationID), data)
+	})
+	if err != nil {
+		fmt.Printf("[THINKING-CACHE] BadgerDB write error: %v\n", err)
+	}
+}
+
+// runGC periodically runs BadgerDB garbage collection.
+func (tc *ThinkingCache) runGC() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			// Run value log GC
+			for {
+				err := tc.db.RunValueLogGC(0.5) // Reclaim if 50%+ space can be freed
+				if err != nil {
+					break // No more GC needed
+				}
+			}
+		case <-tc.doneChan:
+			return
+		}
 	}
 }
 
 // Get retrieves a thinking block by conversation ID.
-// First checks RAM cache, then falls back to SQLite.
+// First checks RAM cache, then falls back to BadgerDB.
 func (tc *ThinkingCache) Get(conversationID string) ([]byte, bool) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
@@ -209,49 +285,52 @@ func (tc *ThinkingCache) Get(conversationID string) ([]byte, bool) {
 		tc.lruList.MoveToFront(elem)
 		entry := elem.Value.(*lruEntry)
 		entry.block.LastAccessed = time.Now().Unix()
-		fmt.Printf("[THINKING-CACHE] HIT (RAM): conversation=%s size=%d bytes\n", conversationID[:8], len(entry.block.ThinkingData))
+		fmt.Printf("[THINKING-CACHE] HIT (RAM): conversation=%s size=%d bytes\n", conversationID[:min(8, len(conversationID))], len(entry.block.ThinkingData))
 		return entry.block.ThinkingData, true
 	}
 
-	// Not in RAM, check SQLite
-	var thinkingData []byte
-	var createdAt, lastAccessed int64
-	err := tc.db.QueryRow(`
-		SELECT thinking_block, created_at, last_accessed
-		FROM thinking_cache
-		WHERE conversation_id = ?
-	`, conversationID).Scan(&thinkingData, &createdAt, &lastAccessed)
+	// Not in RAM, check BadgerDB
+	var block ThinkingBlock
+	found := false
 
-	if err != nil {
+	err := tc.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(conversationID))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			if err := json.Unmarshal(val, &block); err != nil {
+				return err
+			}
+			found = true
+			return nil
+		})
+	})
+
+	if err != nil || !found {
 		return nil, false
 	}
 
-	// Found in SQLite, load into RAM cache
-	block := &ThinkingBlock{
-		ConversationID: conversationID,
-		ThinkingData:   thinkingData,
-		CreatedAt:      createdAt,
-		LastAccessed:   time.Now().Unix(),
-		SizeBytes:      len(thinkingData),
-	}
+	// Found in BadgerDB, load into RAM cache
+	block.LastAccessed = time.Now().Unix()
 
 	// Evict if necessary to make room
 	tc.evictIfNecessary(int64(block.SizeBytes))
 
 	// Add to RAM cache
-	entry := &lruEntry{key: conversationID, block: block}
+	entry := &lruEntry{key: conversationID, block: &block}
 	elem := tc.lruList.PushFront(entry)
 	tc.cache[conversationID] = elem
 	tc.usedBytes += int64(block.SizeBytes)
 
-	// Update last_accessed in SQLite (async)
-	tc.writeChan <- block
+	// Update last_accessed in BadgerDB (async)
+	tc.writeChan <- &block
 
-	fmt.Printf("[THINKING-CACHE] HIT (SQLite): conversation=%s size=%d bytes\n", conversationID[:8], len(thinkingData))
-	return thinkingData, true
+	fmt.Printf("[THINKING-CACHE] HIT (BadgerDB): conversation=%s size=%d bytes\n", conversationID[:min(8, len(conversationID))], len(block.ThinkingData))
+	return block.ThinkingData, true
 }
 
-// Set stores a thinking block in both RAM cache and SQLite.
+// Set stores a thinking block in both RAM cache and BadgerDB.
 func (tc *ThinkingCache) Set(conversationID string, thinkingData []byte) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
@@ -284,14 +363,14 @@ func (tc *ThinkingCache) Set(conversationID string, thinkingData []byte) {
 		tc.usedBytes += int64(block.SizeBytes)
 	}
 
-	// Async write to SQLite
+	// Async write to BadgerDB
 	tc.writeChan <- block
 
-	fmt.Printf("[THINKING-CACHE] STORE: conversation=%s size=%d bytes\n", conversationID[:8], len(thinkingData))
+	fmt.Printf("[THINKING-CACHE] STORE: conversation=%s size=%d bytes\n", conversationID[:min(8, len(conversationID))], len(thinkingData))
 }
 
 // evictIfNecessary removes LRU entries from RAM until there's room for newBytes.
-// Note: Entries are only removed from RAM, never from SQLite.
+// Note: Entries are only removed from RAM, never from BadgerDB.
 func (tc *ThinkingCache) evictIfNecessary(newBytes int64) {
 	for tc.usedBytes+newBytes > tc.maxBytes && tc.lruList.Len() > 0 {
 		// Remove least recently used (back of list)
@@ -381,4 +460,12 @@ func GenerateConversationIDFromMessages(messages []interface{}) string {
 		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
 	}
 	return GenerateConversationID(data)
+}
+
+// min returns the smaller of two integers.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

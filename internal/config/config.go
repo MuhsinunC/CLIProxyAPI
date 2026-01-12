@@ -253,13 +253,19 @@ type PayloadModelRule struct {
 
 // ThinkingCacheConfig holds configuration for the Claude thinking block cache.
 // This cache enables tool loops with extended thinking by persisting thinking blocks.
+// Uses BadgerDB for high-performance persistent storage (significantly faster than SQLite).
 type ThinkingCacheConfig struct {
 	// Enabled toggles the thinking block cache on or off.
 	Enabled bool `yaml:"enabled" json:"enabled"`
 	// MaxMemoryMB is the maximum RAM allocated for the cache (default 512MB).
 	MaxMemoryMB int `yaml:"max-memory-mb" json:"max-memory-mb"`
-	// SQLitePath is the path to the SQLite file for persistence.
-	SQLitePath string `yaml:"sqlite-path" json:"sqlite-path"`
+	// StoragePath is the directory path for BadgerDB persistent storage.
+	// This is the recommended setting for new deployments.
+	StoragePath string `yaml:"storage-path" json:"storage-path"`
+	// SQLitePath is deprecated. If set and StoragePath is empty, the cache will
+	// derive a BadgerDB path from this (removing .db extension and adding _badger suffix).
+	// This provides backwards compatibility during migration.
+	SQLitePath string `yaml:"sqlite-path,omitempty" json:"sqlite-path,omitempty"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,
