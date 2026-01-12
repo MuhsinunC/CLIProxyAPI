@@ -8,6 +8,7 @@ package chat_completions
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"time"
 

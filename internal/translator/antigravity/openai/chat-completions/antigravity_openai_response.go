@@ -8,6 +8,7 @@ package chat_completions
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
