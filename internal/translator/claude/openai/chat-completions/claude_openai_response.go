@@ -27,6 +27,9 @@ type ConvertAnthropicResponseToOpenAIParams struct {
 	FinishReason string
 	// Tool calls accumulator for streaming
 	ToolCallsAccumulator map[int]*ToolCallAccumulator
+	// Response format handling: tracks if we intercepted a response_format tool
+	ResponseFormatToolName string // Name of injected response_format tool (empty if not applicable)
+	ResponseFormatHandled  bool   // Whether we've output the response_format tool as content
 }
 
 // ToolCallAccumulator holds the state for accumulating tool call data
@@ -99,6 +102,20 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			// Initialize tool calls accumulator for tracking tool call progress
 			if (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator == nil {
 				(*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
+			}
+
+			// Detect response_format.json_schema in original request (for intercepting injected tool)
+			if rf := gjson.GetBytes(originalRequestRawJSON, "response_format"); rf.Exists() {
+				if rf.Get("type").String() == "json_schema" {
+					origTools := gjson.GetBytes(originalRequestRawJSON, "tools")
+					if !origTools.Exists() || !origTools.IsArray() || len(origTools.Array()) == 0 {
+						toolName := rf.Get("json_schema.name").String()
+						if toolName == "" {
+							toolName = "structured_output"
+						}
+						(*param).(*ConvertAnthropicResponseToOpenAIParams).ResponseFormatToolName = toolName
+					}
+				}
 			}
 		}
 		return []string{template}
@@ -178,6 +195,24 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 				if arguments == "" {
 					arguments = "{}"
 				}
+
+				// Check if this is our injected response_format tool
+				// Note: The executor may add a "proxy_" prefix to tool names, so check both forms
+				responseFormatToolName := (*param).(*ConvertAnthropicResponseToOpenAIParams).ResponseFormatToolName
+				isResponseFormatTool := responseFormatToolName != "" &&
+					(accumulator.Name == responseFormatToolName || accumulator.Name == "proxy_"+responseFormatToolName)
+				if isResponseFormatTool {
+					// This is our injected tool - output arguments as content instead of tool_calls
+					template, _ = sjson.Set(template, "choices.0.delta.content", arguments)
+					(*param).(*ConvertAnthropicResponseToOpenAIParams).ResponseFormatHandled = true
+
+					// Clean up the accumulator for this index
+					delete((*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator, index)
+
+					return []string{template}
+				}
+
+				// Regular tool call handling
 				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.index", index)
 				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.id", accumulator.ID)
 				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.type", "function")
@@ -196,8 +231,16 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 		// Handle message-level changes including stop reason and usage
 		if delta := root.Get("delta"); delta.Exists() {
 			if stopReason := delta.Get("stop_reason"); stopReason.Exists() {
-				(*param).(*ConvertAnthropicResponseToOpenAIParams).FinishReason = mapAnthropicStopReasonToOpenAI(stopReason.String())
-				template, _ = sjson.Set(template, "choices.0.finish_reason", (*param).(*ConvertAnthropicResponseToOpenAIParams).FinishReason)
+				finishReason := mapAnthropicStopReasonToOpenAI(stopReason.String())
+
+				// If response_format was handled and stop_reason was "tool_use",
+				// change finish_reason to "stop" since we converted the tool call to content
+				if (*param).(*ConvertAnthropicResponseToOpenAIParams).ResponseFormatHandled && stopReason.String() == "tool_use" {
+					finishReason = "stop"
+				}
+
+				(*param).(*ConvertAnthropicResponseToOpenAIParams).FinishReason = finishReason
+				template, _ = sjson.Set(template, "choices.0.finish_reason", finishReason)
 			}
 		}
 
@@ -276,6 +319,22 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 			continue
 		}
 		chunks = append(chunks, bytes.TrimSpace(line[5:]))
+	}
+
+	// Check if original request had response_format.json_schema (and no other tools)
+	// If so, we need to intercept the injected tool and return its arguments as content
+	var responseFormatToolName string
+	if rf := gjson.GetBytes(originalRequestRawJSON, "response_format"); rf.Exists() {
+		if rf.Get("type").String() == "json_schema" {
+			// Check if no other tools were in original request
+			origTools := gjson.GetBytes(originalRequestRawJSON, "tools")
+			if !origTools.Exists() || !origTools.IsArray() || len(origTools.Array()) == 0 {
+				responseFormatToolName = rf.Get("json_schema.name").String()
+				if responseFormatToolName == "" {
+					responseFormatToolName = "structured_output"
+				}
+			}
+		}
 	}
 
 	// Base OpenAI non-streaming response template
@@ -391,6 +450,8 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	}
 
 	// Set tool calls if any were accumulated during processing
+	// Special handling: if response_format was used, intercept the injected tool and return as content
+	responseFormatHandled := false
 	if len(toolCallsAccumulator) > 0 {
 		toolCallsCount := 0
 		maxIndex := -1
@@ -408,6 +469,18 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 
 			arguments := accumulator.Arguments.String()
 
+			// Check if this is our injected response_format tool
+			// Note: The executor may add a "proxy_" prefix to tool names, so check both forms
+			isResponseFormatTool := responseFormatToolName != "" &&
+				(accumulator.Name == responseFormatToolName || accumulator.Name == "proxy_"+responseFormatToolName)
+			if isResponseFormatTool {
+				// This is our injected tool - extract arguments as content instead
+				out, _ = sjson.Set(out, "choices.0.message.content", arguments)
+				responseFormatHandled = true
+				// Don't add to tool_calls, skip to next
+				continue
+			}
+
 			idPath := fmt.Sprintf("choices.0.message.tool_calls.%d.id", toolCallsCount)
 			typePath := fmt.Sprintf("choices.0.message.tool_calls.%d.type", toolCallsCount)
 			namePath := fmt.Sprintf("choices.0.message.tool_calls.%d.function.name", toolCallsCount)
@@ -419,7 +492,12 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 			out, _ = sjson.Set(out, argumentsPath, arguments)
 			toolCallsCount++
 		}
-		if toolCallsCount > 0 {
+
+		// Set finish_reason based on what was handled
+		if responseFormatHandled && toolCallsCount == 0 {
+			// Only response_format tool was called - finish as "stop"
+			out, _ = sjson.Set(out, "choices.0.finish_reason", "stop")
+		} else if toolCallsCount > 0 {
 			out, _ = sjson.Set(out, "choices.0.finish_reason", "tool_calls")
 		} else {
 			out, _ = sjson.Set(out, "choices.0.finish_reason", mapAnthropicStopReasonToOpenAI(stopReason))

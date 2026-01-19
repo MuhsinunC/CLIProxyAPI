@@ -299,6 +299,46 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		}
 	}
 
+	// Response format handling: Convert json_schema to tool injection
+	// Only applies when response_format.type == "json_schema" AND no other tools are present
+	if responseFormat := root.Get("response_format"); responseFormat.Exists() {
+		rfType := responseFormat.Get("type").String()
+		if rfType == "json_schema" {
+			// Check if tools were already present in the original request
+			existingTools := root.Get("tools")
+			hasExistingTools := existingTools.Exists() && existingTools.IsArray() && len(existingTools.Array()) > 0
+
+			if !hasExistingTools {
+				jsonSchema := responseFormat.Get("json_schema")
+				if jsonSchema.Exists() {
+					// Get tool name from schema or use default
+					toolName := jsonSchema.Get("name").String()
+					if toolName == "" {
+						toolName = "structured_output"
+					}
+
+					// Create tool from schema
+					schema := jsonSchema.Get("schema")
+					if schema.Exists() {
+						anthropicTool := map[string]interface{}{
+							"name":         toolName,
+							"description":  "Return structured output matching the required schema. Output ONLY the JSON data as the tool input, no additional text.",
+							"input_schema": schema.Value(),
+						}
+
+						toolsJSON, _ := json.Marshal([]interface{}{anthropicTool})
+						out, _ = sjson.SetRaw(out, "tools", string(toolsJSON))
+
+						// Force Claude to use the tool
+						out, _ = sjson.Set(out, "tool_choice", map[string]interface{}{
+							"type": "any",
+						})
+					}
+				}
+			}
+		}
+	}
+
 	// Tool choice mapping from OpenAI format to Claude Code format
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
 		switch toolChoice.Type {
