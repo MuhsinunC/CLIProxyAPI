@@ -5,10 +5,10 @@
 # ============================================
 #
 # Usage:
-#   ./start.sh              # Start with ngrok tunnel (brew version)
-#   ./start.sh --local      # Build from source and start with ngrok
+#   ./start.sh              # Build from source and start with ngrok (default)
+#   ./start.sh --brew       # Use brew version instead of building from source
 #   ./start.sh --no-ngrok   # Start without ngrok (localhost only)
-#   ./start.sh --local --no-ngrok  # Build from source, no ngrok
+#   ./start.sh --brew --no-ngrok  # Brew version, no ngrok
 #
 # Environment variables (can be set in .env):
 #   USE_NGROK=true|false    # Enable/disable ngrok tunnel (default: true)
@@ -36,13 +36,13 @@ PORT="${PORT:-8317}"
 
 # Feature flags (can be set via env or command line)
 USE_NGROK="${USE_NGROK:-true}"
-USE_LOCAL_BUILD=false
+USE_LOCAL_BUILD=true  # Default to local build for development
 
 # Parse command line arguments
 for arg in "$@"; do
     case $arg in
-        --local)
-            USE_LOCAL_BUILD=true
+        --brew)
+            USE_LOCAL_BUILD=false
             ;;
         --no-ngrok)
             USE_NGROK=false
