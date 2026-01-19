@@ -142,6 +142,57 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	}
 }
 
+// GetPerplexityModels returns supported models for Perplexity Pro accounts.
+func GetPerplexityModels() []*ModelInfo {
+	entries := []struct {
+		ID          string
+		DisplayName string
+		Description string
+		Created     int64
+	}{
+		// Claude models
+		{ID: "claude-4.5-sonnet", DisplayName: "Claude Sonnet 4.5", Description: "Anthropic Claude 4.5 Sonnet via Perplexity", Created: 1736899200},
+		{ID: "claude-4.5-sonnet-thinking", DisplayName: "Claude Sonnet 4.5 (Thinking)", Description: "Claude 4.5 Sonnet with extended thinking", Created: 1736899200},
+		{ID: "claude-4.5-opus", DisplayName: "Claude Opus 4.5", Description: "Anthropic Claude 4.5 Opus (max tier) via Perplexity", Created: 1736899200},
+		{ID: "claude-4.5-opus-thinking", DisplayName: "Claude Opus 4.5 (Thinking)", Description: "Claude 4.5 Opus with extended thinking", Created: 1736899200},
+
+		// GPT models
+		{ID: "gpt-5.2", DisplayName: "GPT-5.2", Description: "OpenAI GPT-5.2 via Perplexity", Created: 1736899200},
+		{ID: "gpt-5.2-thinking", DisplayName: "GPT-5.2 (Reasoning)", Description: "GPT-5.2 with reasoning/thinking mode", Created: 1736899200},
+
+		// Gemini models
+		{ID: "gemini-3-flash", DisplayName: "Gemini 3 Flash", Description: "Google Gemini 3 Flash via Perplexity", Created: 1736899200},
+		{ID: "gemini-3-flash-thinking", DisplayName: "Gemini 3 Flash (Reasoning)", Description: "Gemini 3 Flash with reasoning mode", Created: 1736899200},
+		{ID: "gemini-3-pro", DisplayName: "Gemini 3 Pro", Description: "Google Gemini 3 Pro via Perplexity", Created: 1736899200},
+
+		// Grok models
+		{ID: "grok-4.1", DisplayName: "Grok 4.1", Description: "xAI Grok 4.1 via Perplexity", Created: 1736899200},
+		{ID: "grok-4.1-reasoning", DisplayName: "Grok 4.1 (Reasoning)", Description: "Grok 4.1 with reasoning mode", Created: 1736899200},
+
+		// Other models
+		{ID: "kimi-k2-thinking", DisplayName: "Kimi K2 Thinking", Description: "Moonshot Kimi K2 with thinking (hosted in US)", Created: 1736899200},
+
+		// Perplexity native models
+		{ID: "best", DisplayName: "Best", Description: "Perplexity's best model selection", Created: 1736899200},
+		{ID: "sonar", DisplayName: "Sonar", Description: "Perplexity Sonar model", Created: 1736899200},
+		{ID: "perplexity-pro", DisplayName: "Perplexity Pro", Description: "Perplexity Pro default model", Created: 1736899200},
+	}
+
+	var models []*ModelInfo
+	for _, entry := range entries {
+		models = append(models, &ModelInfo{
+			ID:          entry.ID,
+			Object:      "model",
+			Created:     entry.Created,
+			OwnedBy:     "perplexity",
+			Type:        "perplexity",
+			DisplayName: entry.DisplayName,
+			Description: entry.Description,
+		})
+	}
+	return models
+}
+
 // LookupStaticModelInfo searches all static model definitions for a model by ID.
 // Returns nil if no matching model is found.
 func LookupStaticModelInfo(modelID string) *ModelInfo {
@@ -161,6 +212,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.IFlow,
 		data.Kimi,
 		data.Antigravity,
+		GetPerplexityModels(),
 	}
 	for _, models := range allModels {
 		for _, m := range models {

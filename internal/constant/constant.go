@@ -24,4 +24,7 @@ const (
 
 	// Antigravity represents the Antigravity response format identifier.
 	Antigravity = "antigravity"
+
+	// Perplexity represents the Perplexity AI provider identifier.
+	Perplexity = "perplexity"
 )
