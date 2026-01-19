@@ -329,9 +329,10 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						toolsJSON, _ := json.Marshal([]interface{}{anthropicTool})
 						out, _ = sjson.SetRaw(out, "tools", string(toolsJSON))
 
-						// Force Claude to use the tool
+						// Force Claude to use the specific tool by name
 						out, _ = sjson.Set(out, "tool_choice", map[string]interface{}{
-							"type": "any",
+							"type": "tool",
+							"name": toolName,
 						})
 					}
 				}
