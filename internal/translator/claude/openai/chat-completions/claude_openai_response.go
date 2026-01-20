@@ -104,15 +104,23 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 				(*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
 			}
 
-			// Detect response_format.json_schema in original request (for intercepting injected tool)
+			// Detect response_format in original request (for intercepting injected tool)
 			if rf := gjson.GetBytes(originalRequestRawJSON, "response_format"); rf.Exists() {
-				if rf.Get("type").String() == "json_schema" {
-					origTools := gjson.GetBytes(originalRequestRawJSON, "tools")
-					if !origTools.Exists() || !origTools.IsArray() || len(origTools.Array()) == 0 {
-						toolName := rf.Get("json_schema.name").String()
+				rfType := rf.Get("type").String()
+				origTools := gjson.GetBytes(originalRequestRawJSON, "tools")
+				hasOrigTools := origTools.Exists() && origTools.IsArray() && len(origTools.Array()) > 0
+
+				if !hasOrigTools {
+					var toolName string
+					if rfType == "json_schema" {
+						toolName = rf.Get("json_schema.name").String()
 						if toolName == "" {
 							toolName = "structured_output"
 						}
+					} else if rfType == "json_object" {
+						toolName = "json_response"
+					}
+					if toolName != "" {
 						(*param).(*ConvertAnthropicResponseToOpenAIParams).ResponseFormatToolName = toolName
 					}
 				}
@@ -321,18 +329,22 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 		chunks = append(chunks, bytes.TrimSpace(line[5:]))
 	}
 
-	// Check if original request had response_format.json_schema (and no other tools)
+	// Check if original request had response_format (json_schema or json_object) and no other tools
 	// If so, we need to intercept the injected tool and return its arguments as content
 	var responseFormatToolName string
 	if rf := gjson.GetBytes(originalRequestRawJSON, "response_format"); rf.Exists() {
-		if rf.Get("type").String() == "json_schema" {
-			// Check if no other tools were in original request
-			origTools := gjson.GetBytes(originalRequestRawJSON, "tools")
-			if !origTools.Exists() || !origTools.IsArray() || len(origTools.Array()) == 0 {
+		rfType := rf.Get("type").String()
+		origTools := gjson.GetBytes(originalRequestRawJSON, "tools")
+		hasOrigTools := origTools.Exists() && origTools.IsArray() && len(origTools.Array()) > 0
+
+		if !hasOrigTools {
+			if rfType == "json_schema" {
 				responseFormatToolName = rf.Get("json_schema.name").String()
 				if responseFormatToolName == "" {
 					responseFormatToolName = "structured_output"
 				}
+			} else if rfType == "json_object" {
+				responseFormatToolName = "json_response"
 			}
 		}
 	}
