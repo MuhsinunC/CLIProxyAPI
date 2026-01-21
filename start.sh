@@ -14,7 +14,7 @@
 # Environment variables (can be set in .env):
 #   USE_NGROK=true|false    # Enable/disable ngrok tunnel (default: true)
 #   NGROK_DOMAIN=           # Custom ngrok domain (optional)
-#   PORT=8317               # CLIProxyAPI port (default: 8317)
+#   PORT=                   # Override port (reads from config.yaml by default)
 #   CLIPROXY_BIN=           # Path to cliproxyapi binary
 #   NGROK_BIN=              # Path to ngrok binary
 #
@@ -33,7 +33,14 @@ NGROK_DOMAIN="${NGROK_DOMAIN:-}"
 NGROK_CONFIG_DEFAULT="$HOME/Library/Application Support/ngrok/ngrok.yml"
 NGROK_CONFIG="${NGROK_CONFIG:-$NGROK_CONFIG_DEFAULT}"
 CLIPROXY_BIN="${CLIPROXY_BIN:-cliproxyapi}"
-PORT="${PORT:-8317}"
+
+# Read port from config.yaml (falls back to 8317 if not found)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONFIG_FILE="$SCRIPT_DIR/config.yaml"
+if [ -f "$CONFIG_FILE" ]; then
+    CONFIG_PORT=$(grep "^port:" "$CONFIG_FILE" 2>/dev/null | awk '{print $2}')
+fi
+PORT="${PORT:-${CONFIG_PORT:-8317}}"
 
 # Feature flags (can be set via env or command line)
 USE_NGROK="${USE_NGROK:-true}"
