@@ -20,6 +20,39 @@ var (
 	dataTag = []byte("data:")
 )
 
+// unwrapResponseFormatEnvelope detects and unwraps common envelope patterns
+// that Claude may use when responding to json_object requests.
+// Handles: {"result": ...}, {"response": ...}, {"values": ...} (LiteLLM pattern)
+// The inner value can be a string (double-encoded JSON) or an object/array.
+func unwrapResponseFormatEnvelope(jsonStr string) string {
+	parsed := gjson.Parse(jsonStr)
+	if !parsed.IsObject() {
+		return jsonStr
+	}
+
+	// Check for single-key envelope patterns (includes LiteLLM's "values" pattern)
+	envelopeKeys := []string{"result", "response", "values"}
+	obj := parsed.Map()
+	if len(obj) == 1 {
+		for _, key := range envelopeKeys {
+			if val, exists := obj[key]; exists {
+				// If value is a string, it might be double-encoded JSON
+				if val.Type == gjson.String {
+					inner := val.String()
+					if gjson.Valid(inner) {
+						return inner
+					}
+				}
+				// If value is an object/array, return it directly
+				if val.IsObject() || val.IsArray() {
+					return val.Raw
+				}
+			}
+		}
+	}
+	return jsonStr
+}
+
 // ConvertAnthropicResponseToOpenAIParams holds parameters for response conversion
 type ConvertAnthropicResponseToOpenAIParams struct {
 	CreatedAt    int64
@@ -211,6 +244,8 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 					(accumulator.Name == responseFormatToolName || accumulator.Name == "proxy_"+responseFormatToolName)
 				if isResponseFormatTool {
 					// This is our injected tool - output arguments as content instead of tool_calls
+					// Unwrap any envelope patterns like {"result": ...} or {"response": ...}
+					arguments = unwrapResponseFormatEnvelope(arguments)
 					template, _ = sjson.Set(template, "choices.0.delta.content", arguments)
 					(*param).(*ConvertAnthropicResponseToOpenAIParams).ResponseFormatHandled = true
 
@@ -487,6 +522,8 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 				(accumulator.Name == responseFormatToolName || accumulator.Name == "proxy_"+responseFormatToolName)
 			if isResponseFormatTool {
 				// This is our injected tool - extract arguments as content instead
+				// Unwrap any envelope patterns like {"result": ...} or {"response": ...}
+				arguments = unwrapResponseFormatEnvelope(arguments)
 				out, _ = sjson.Set(out, "choices.0.message.content", arguments)
 				responseFormatHandled = true
 				// Don't add to tool_calls, skip to next

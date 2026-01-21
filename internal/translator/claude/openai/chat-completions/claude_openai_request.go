@@ -338,7 +338,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			if toolName != "" && inputSchema != nil {
 				anthropicTool := map[string]interface{}{
 					"name":         toolName,
-					"description":  "Return the response as a JSON object. Output ONLY valid JSON data as the tool input, no markdown or extra text.",
+					"description":  "Return the JSON response directly as the tool input. Do NOT wrap it in any envelope like {\"result\": ...} or {\"response\": ...}. Output the raw JSON object exactly as requested.",
 					"input_schema": inputSchema,
 				}
 
