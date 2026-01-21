@@ -49,10 +49,14 @@ for arg in "$@"; do
             USE_NGROK=false
             ;;
         --stop)
-            echo "Stopping CLIProxyAPI processes..."
-            pkill -f "cli-proxy-api" 2>/dev/null || true
-            lsof -ti ":$PORT" | xargs kill 2>/dev/null || true
-            echo "Done."
+            echo "Stopping CLIProxyAPI on port $PORT..."
+            PIDS=$(lsof -ti ":$PORT" 2>/dev/null)
+            if [ -n "$PIDS" ]; then
+                echo "$PIDS" | xargs kill 2>/dev/null
+                echo "Killed process(es): $PIDS"
+            else
+                echo "No process found on port $PORT"
+            fi
             exit 0
             ;;
         --help|-h)
