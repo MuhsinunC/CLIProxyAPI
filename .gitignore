@@ -35,6 +35,7 @@ GEMINI.md
 .vscode/*
 .codex/*
 .claude/*
+!.claude/CLAUDE.md
 .gemini/*
 .serena/*
 .agent/*

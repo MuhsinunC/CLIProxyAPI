@@ -8,6 +8,7 @@
 #   ./start.sh              # Build from source and start with ngrok (default)
 #   ./start.sh --brew       # Use brew version instead of building from source
 #   ./start.sh --no-ngrok   # Start without ngrok (localhost only)
+#   ./start.sh --stop       # Stop any running server processes
 #   ./start.sh --brew --no-ngrok  # Brew version, no ngrok
 #
 # Environment variables (can be set in .env):
@@ -47,12 +48,30 @@ for arg in "$@"; do
         --no-ngrok)
             USE_NGROK=false
             ;;
+        --stop)
+            echo "Stopping CLIProxyAPI processes..."
+            pkill -f "cli-proxy-api" 2>/dev/null || true
+            lsof -ti ":$PORT" | xargs kill 2>/dev/null || true
+            echo "Done."
+            exit 0
+            ;;
         --help|-h)
             sed -n '3,19p' "$0" | sed 's/^# //' | sed 's/^#//'
             exit 0
             ;;
     esac
 done
+
+# Check if port is already in use
+if lsof -i ":$PORT" >/dev/null 2>&1; then
+    echo "ERROR: Port $PORT is already in use!"
+    echo "Another instance may be running."
+    echo ""
+    lsof -i ":$PORT"
+    echo ""
+    echo "Run './start.sh --stop' to kill existing processes."
+    exit 1
+fi
 
 # Print startup banner
 if [ "$USE_NGROK" = "true" ] || [ "$USE_NGROK" = "1" ]; then
@@ -183,16 +202,14 @@ echo ""
 
 # Start ngrok if enabled
 if [ "$USE_NGROK" = "true" ] || [ "$USE_NGROK" = "1" ]; then
-    NGROK_LOG="/tmp/ngrok.log"
-
     if [ -n "$NGROK_DOMAIN" ]; then
         echo "Starting ngrok tunnel: https://$NGROK_DOMAIN -> http://localhost:$PORT"
-        "$NGROK_BIN" http --domain="$NGROK_DOMAIN" "$PORT" >"$NGROK_LOG" 2>&1 &
+        ( "$NGROK_BIN" http --domain="$NGROK_DOMAIN" "$PORT" 2>&1 | sed 's/^/[NGROK] /' ) &
         NGROK_PID=$!
         NGROK_URL="https://$NGROK_DOMAIN"
     else
         echo "Starting ngrok tunnel (random URL) -> http://localhost:$PORT"
-        "$NGROK_BIN" http "$PORT" >"$NGROK_LOG" 2>&1 &
+        ( "$NGROK_BIN" http "$PORT" 2>&1 | sed 's/^/[NGROK] /' ) &
         NGROK_PID=$!
 
         # Wait for ngrok to start and get the public URL
@@ -201,12 +218,12 @@ if [ "$USE_NGROK" = "true" ] || [ "$USE_NGROK" = "1" ]; then
 
         if [ -z "$NGROK_URL" ]; then
             echo "Warning: Could not get ngrok URL automatically."
-            echo "Check $NGROK_LOG or http://localhost:4040 for your URL"
+            echo "Check http://localhost:4040 for your URL"
             NGROK_URL="<check ngrok dashboard>"
         fi
     fi
 
-    echo "ngrok started (PID $NGROK_PID, logs: $NGROK_LOG)"
+    echo "ngrok started (PID $NGROK_PID)"
     echo ""
     echo "=========================================="
     echo "Use these settings in Cursor:"
