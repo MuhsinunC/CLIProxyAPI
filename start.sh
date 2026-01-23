@@ -57,12 +57,19 @@ for arg in "$@"; do
             ;;
         --stop)
             echo "Stopping CLIProxyAPI on port $PORT..."
+            # Kill server process on port
             PIDS=$(lsof -ti ":$PORT" 2>/dev/null)
             if [ -n "$PIDS" ]; then
                 echo "$PIDS" | xargs kill 2>/dev/null
-                echo "Killed process(es): $PIDS"
+                echo "Killed server process(es): $PIDS"
             else
-                echo "No process found on port $PORT"
+                echo "No server found on port $PORT"
+            fi
+            # Kill ngrok tunneling to our port
+            NGROK_PIDS=$(pgrep -f "ngrok.*$PORT" 2>/dev/null)
+            if [ -n "$NGROK_PIDS" ]; then
+                echo "$NGROK_PIDS" | xargs kill 2>/dev/null
+                echo "Killed ngrok process(es): $NGROK_PIDS"
             fi
             exit 0
             ;;
