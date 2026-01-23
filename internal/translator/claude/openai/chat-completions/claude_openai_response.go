@@ -53,6 +53,35 @@ func unwrapResponseFormatEnvelope(jsonStr string) string {
 	return jsonStr
 }
 
+// stripMarkdownCodeFences removes markdown code fences from JSON responses.
+// Claude sometimes wraps JSON in ```json...``` even when instructed not to.
+// This handles both ```json and ``` prefixes with optional language identifiers.
+func stripMarkdownCodeFences(content string) string {
+	content = strings.TrimSpace(content)
+	if !strings.HasPrefix(content, "```") {
+		return content
+	}
+
+	lines := strings.Split(content, "\n")
+	if len(lines) < 2 {
+		return content
+	}
+
+	// Find the closing ``` fence
+	lastIdx := len(lines) - 1
+	for lastIdx >= 0 && strings.TrimSpace(lines[lastIdx]) == "" {
+		lastIdx--
+	}
+
+	if lastIdx > 0 && strings.TrimSpace(lines[lastIdx]) == "```" {
+		// Remove first line (```json or ```) and last line (```)
+		innerLines := lines[1:lastIdx]
+		return strings.TrimSpace(strings.Join(innerLines, "\n"))
+	}
+
+	return content
+}
+
 // ConvertAnthropicResponseToOpenAIParams holds parameters for response conversion
 type ConvertAnthropicResponseToOpenAIParams struct {
 	CreatedAt    int64
@@ -63,6 +92,8 @@ type ConvertAnthropicResponseToOpenAIParams struct {
 	// Response format handling: tracks if we intercepted a response_format tool
 	ResponseFormatToolName string // Name of injected response_format tool (empty if not applicable)
 	ResponseFormatHandled  bool   // Whether we've output the response_format tool as content
+	// JsonObjectMode: true when response_format.type is "json_object" (needs markdown stripping)
+	JsonObjectMode bool
 }
 
 // ToolCallAccumulator holds the state for accumulating tool call data
@@ -137,24 +168,24 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 				(*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
 			}
 
-			// Detect response_format in original request (for intercepting injected tool)
+			// Detect response_format in original request
+			// For json_schema: track tool name for interception
+			// For json_object: set JsonObjectMode (no tool injection, needs markdown stripping)
 			if rf := gjson.GetBytes(originalRequestRawJSON, "response_format"); rf.Exists() {
 				rfType := rf.Get("type").String()
 				origTools := gjson.GetBytes(originalRequestRawJSON, "tools")
 				hasOrigTools := origTools.Exists() && origTools.IsArray() && len(origTools.Array()) > 0
 
 				if !hasOrigTools {
-					var toolName string
 					if rfType == "json_schema" {
-						toolName = rf.Get("json_schema.name").String()
+						toolName := rf.Get("json_schema.name").String()
 						if toolName == "" {
 							toolName = "structured_output"
 						}
-					} else if rfType == "json_object" {
-						toolName = "json_response"
-					}
-					if toolName != "" {
 						(*param).(*ConvertAnthropicResponseToOpenAIParams).ResponseFormatToolName = toolName
+					} else if rfType == "json_object" {
+						// json_object mode: no tool injection, track for markdown stripping
+						(*param).(*ConvertAnthropicResponseToOpenAIParams).JsonObjectMode = true
 					}
 				}
 			}
@@ -365,8 +396,10 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	}
 
 	// Check if original request had response_format (json_schema or json_object) and no other tools
-	// If so, we need to intercept the injected tool and return its arguments as content
+	// For json_schema: intercept the injected tool and return its arguments as content
+	// For json_object: no tool injection, but apply markdown stripping to text content
 	var responseFormatToolName string
+	var jsonObjectMode bool
 	if rf := gjson.GetBytes(originalRequestRawJSON, "response_format"); rf.Exists() {
 		rfType := rf.Get("type").String()
 		origTools := gjson.GetBytes(originalRequestRawJSON, "tools")
@@ -379,7 +412,8 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 					responseFormatToolName = "structured_output"
 				}
 			} else if rfType == "json_object" {
-				responseFormatToolName = "json_response"
+				// json_object mode: no tool injection, just needs markdown stripping
+				jsonObjectMode = true
 			}
 		}
 	}
@@ -487,6 +521,10 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 
 	// Set message content by combining all text parts
 	messageContent := strings.Join(contentParts, "")
+	// For json_object mode, strip any markdown code fences that Claude might add
+	if jsonObjectMode && messageContent != "" {
+		messageContent = stripMarkdownCodeFences(messageContent)
+	}
 	out, _ = sjson.Set(out, "choices.0.message.content", messageContent)
 
 	// Add reasoning content if available (following OpenAI reasoning format)
