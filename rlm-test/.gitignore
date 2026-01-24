@@ -1,0 +1,5 @@
+# Don't commit API keys
+.env
+
+# Virtual environment
+.venv/
