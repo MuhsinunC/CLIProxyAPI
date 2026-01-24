@@ -1,0 +1,21 @@
+# .github/workflows/backup.yml
+name: Backup Thinking Cache
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Daily at midnight UTC
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  backup:
+    name: Backup to Cloudflare R2
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup Fly.io CLI
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Run backup on Fly.io machine
+        run: flyctl ssh console -C "/app/scripts/backup-to-r2.sh"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
