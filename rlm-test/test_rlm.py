@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """
-Simple test script to verify RLM is working.
-Supports OpenAI or Anthropic backends.
+RLM test script with primary (Sonnet) and secondary (Haiku) models.
 
 The Anthropic SDK automatically reads these env vars:
   - ANTHROPIC_API_KEY
   - ANTHROPIC_BASE_URL (for custom proxy)
-
-The OpenAI SDK automatically reads:
-  - OPENAI_API_KEY
-  - OPENAI_BASE_URL (for custom proxy)
 """
 import os
 import sys
@@ -22,59 +17,52 @@ if env_path.exists():
     load_dotenv(env_path)
     print(f"Loaded environment from {env_path}")
 
-# Auto-detect which API key is available
-openai_key = os.environ.get("OPENAI_API_KEY")
+# Get API key
 anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-
-# Model override (optional)
-model_override = os.environ.get("RLM_MODEL")
-
-if anthropic_key:
-    BACKEND = "anthropic"
-    MODEL = model_override or "claude-sonnet-4-20250514"
-    base_url = os.environ.get("ANTHROPIC_BASE_URL")
-    print(f"Using Anthropic backend with {MODEL}")
-    if base_url:
-        print(f"  Base URL: {base_url}")
-elif openai_key:
-    BACKEND = "openai"
-    MODEL = model_override or "gpt-4o-mini"
-    base_url = os.environ.get("OPENAI_BASE_URL")
-    print(f"Using OpenAI backend with {MODEL}")
-    if base_url:
-        print(f"  Base URL: {base_url}")
-else:
-    print("ERROR: No API key found")
-    print()
-    print("Set in rlm-test/.env:")
-    print("  ANTHROPIC_API_KEY=your-key")
-    print("  ANTHROPIC_BASE_URL=https://your-proxy  (optional)")
-    print()
-    print("Or:")
-    print("  OPENAI_API_KEY=your-key")
-    print("  OPENAI_BASE_URL=https://your-proxy  (optional)")
+if not anthropic_key:
+    print("ERROR: ANTHROPIC_API_KEY not found in environment")
     sys.exit(1)
+
+# Model configuration
+PRIMARY_MODEL = os.environ.get("RLM_PRIMARY_MODEL", "claude-sonnet-4-5-20250929")
+SECONDARY_MODEL = os.environ.get("RLM_SECONDARY_MODEL", "claude-haiku-4-5-20251001")
+
+base_url = os.environ.get("ANTHROPIC_BASE_URL")
+print(f"Primary model: {PRIMARY_MODEL}")
+print(f"Secondary model: {SECONDARY_MODEL}")
+if base_url:
+    print(f"Base URL: {base_url}")
 
 from rlm import RLM
 
 def main():
-    print("\n=== RLM Test ===\n")
+    print("\n=== RLM Test (Primary + Secondary) ===\n")
 
-    # Build backend kwargs - SDKs read base_url from env automatically
-    backend_kwargs = {
-        "model_name": MODEL,
-        "max_tokens": 4096,  # Keep reasonable to avoid SDK timeout issues
+    # Primary model kwargs (Sonnet)
+    primary_kwargs = {
+        "model_name": PRIMARY_MODEL,
+        "max_tokens": 4096,
+        "api_key": anthropic_key,
     }
 
-    # Initialize RLM
+    # Secondary model kwargs (Haiku)
+    secondary_kwargs = {
+        "model_name": SECONDARY_MODEL,
+        "max_tokens": 4096,
+        "api_key": anthropic_key,
+    }
+
+    # Initialize RLM with primary and secondary
     rlm = RLM(
-        backend=BACKEND,
-        backend_kwargs=backend_kwargs,
+        backend="anthropic",
+        backend_kwargs=primary_kwargs,
+        other_backends=["anthropic"],
+        other_backend_kwargs=[secondary_kwargs],
         environment="local",
         verbose=True
     )
 
-    # Simple test prompt that exercises the REPL loop
+    # Simple test prompt
     prompt = "Write a Python function that returns the sum of two numbers, then call it with 5 and 3."
 
     print(f"Prompt: {prompt}\n")
