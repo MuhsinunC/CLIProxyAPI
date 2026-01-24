@@ -117,6 +117,8 @@ func (m *MockLLMRoundTripper) LastRequest() *RecordedRequest {
 }
 
 // mockClaudeResponse returns a mock Anthropic Claude API response.
+// Claude's API always uses SSE format even for non-streaming requests,
+// so we return SSE format here for the translator to process correctly.
 func (m *MockLLMRoundTripper) mockClaudeResponse(req *http.Request, body []byte) (*http.Response, error) {
 	// Check if streaming is requested
 	stream := gjson.GetBytes(body, "stream").Bool()
@@ -132,57 +134,60 @@ func (m *MockLLMRoundTripper) mockClaudeResponse(req *http.Request, body []byte)
 		model = "claude-sonnet-4-20250514"
 	}
 
-	var responseBody []byte
+	// Build SSE events for non-streaming response
+	// Claude's API returns SSE format even for non-streaming - the translator expects this
+	var events []string
+
+	// Message start event
+	events = append(events, `event: message_start
+data: {"type":"message_start","message":{"id":"msg_mock_001","type":"message","role":"assistant","content":[],"model":"`+model+`","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":100,"output_tokens":0}}}`)
+
 	if hasTools {
-		// Response with tool_use block
-		responseBody = []byte(`{
-			"id": "msg_mock_001",
-			"type": "message",
-			"role": "assistant",
-			"content": [
-				{
-					"type": "tool_use",
-					"id": "toolu_mock_001",
-					"name": "get_weather",
-					"input": {"location": "San Francisco"}
-				}
-			],
-			"model": "` + model + `",
-			"stop_reason": "tool_use",
-			"stop_sequence": null,
-			"usage": {
-				"input_tokens": 100,
-				"output_tokens": 50
-			}
-		}`)
+		// Content block start for tool_use
+		events = append(events, `event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_mock_001","name":"get_weather","input":{}}}`)
+
+		// Input JSON delta
+		events = append(events, `event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"location\":\"San Francisco\"}"}}`)
+
+		// Content block stop
+		events = append(events, `event: content_block_stop
+data: {"type":"content_block_stop","index":0}`)
+
+		// Message delta with tool_use stop reason
+		events = append(events, `event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":50}}`)
 	} else {
-		// Standard text response
-		responseBody = []byte(`{
-			"id": "msg_mock_001",
-			"type": "message",
-			"role": "assistant",
-			"content": [
-				{
-					"type": "text",
-					"text": "This is a mock response from Claude."
-				}
-			],
-			"model": "` + model + `",
-			"stop_reason": "end_turn",
-			"stop_sequence": null,
-			"usage": {
-				"input_tokens": 100,
-				"output_tokens": 20
-			}
-		}`)
+		// Content block start for text
+		events = append(events, `event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
+
+		// Text delta
+		events = append(events, `event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"This is a mock response from Claude."}}`)
+
+		// Content block stop
+		events = append(events, `event: content_block_stop
+data: {"type":"content_block_stop","index":0}`)
+
+		// Message delta with end_turn stop reason
+		events = append(events, `event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":20}}`)
 	}
+
+	// Message stop event
+	events = append(events, `event: message_stop
+data: {"type":"message_stop"}`)
+
+	responseBody := []byte(strings.Join(events, "\n\n") + "\n\n")
 
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Status:     "200 OK",
 		Body:       io.NopCloser(bytes.NewReader(responseBody)),
 		Header: http.Header{
-			"Content-Type": []string{"application/json"},
+			"Content-Type": []string{"text/event-stream"},
 		},
 	}, nil
 }
@@ -541,28 +546,40 @@ func (m *MockLLMRoundTripper) SetToolCallResponse(toolName string, toolArgs map[
 	argsJSON, _ := json.Marshal(toolArgs)
 
 	m.CustomResponses["api.anthropic.com"] = func(req *http.Request, body []byte) *http.Response {
-		responseBody := []byte(`{
-			"id": "msg_mock_001",
-			"type": "message",
-			"role": "assistant",
-			"content": [
-				{
-					"type": "tool_use",
-					"id": "toolu_mock_001",
-					"name": "` + toolName + `",
-					"input": ` + string(argsJSON) + `
-				}
-			],
-			"model": "claude-sonnet-4-20250514",
-			"stop_reason": "tool_use",
-			"usage": {"input_tokens": 100, "output_tokens": 50}
-		}`)
+		// Build SSE events for tool call response
+		var events []string
+
+		// Message start event
+		events = append(events, `event: message_start
+data: {"type":"message_start","message":{"id":"msg_mock_001","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":100,"output_tokens":0}}}`)
+
+		// Content block start for tool_use
+		events = append(events, `event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_mock_001","name":"`+toolName+`","input":{}}}`)
+
+		// Input JSON delta
+		events = append(events, `event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"`+strings.ReplaceAll(string(argsJSON), `"`, `\"`)+`"}}`)
+
+		// Content block stop
+		events = append(events, `event: content_block_stop
+data: {"type":"content_block_stop","index":0}`)
+
+		// Message delta with tool_use stop reason
+		events = append(events, `event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":50}}`)
+
+		// Message stop event
+		events = append(events, `event: message_stop
+data: {"type":"message_stop"}`)
+
+		responseBody := []byte(strings.Join(events, "\n\n") + "\n\n")
 
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Status:     "200 OK",
 			Body:       io.NopCloser(bytes.NewReader(responseBody)),
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 		}
 	}
 }
@@ -573,34 +590,58 @@ func (m *MockLLMRoundTripper) SetThinkingResponse(thinkingText string, signature
 	defer m.mu.Unlock()
 
 	m.CustomResponses["api.anthropic.com"] = func(req *http.Request, body []byte) *http.Response {
-		thinking := map[string]interface{}{
-			"type":      "thinking",
-			"thinking":  thinkingText,
-			"signature": signature,
-		}
-		text := map[string]interface{}{
-			"type": "text",
-			"text": "This is the response after thinking.",
-		}
+		// Build SSE events for thinking response
+		var events []string
 
-		content := []interface{}{thinking, text}
-		contentJSON, _ := json.Marshal(content)
+		// Message start event
+		events = append(events, `event: message_start
+data: {"type":"message_start","message":{"id":"msg_mock_001","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":100,"output_tokens":0}}}`)
 
-		responseBody := []byte(`{
-			"id": "msg_mock_001",
-			"type": "message",
-			"role": "assistant",
-			"content": ` + string(contentJSON) + `,
-			"model": "claude-sonnet-4-20250514",
-			"stop_reason": "end_turn",
-			"usage": {"input_tokens": 100, "output_tokens": 50}
-		}`)
+		// Thinking content block start
+		events = append(events, `event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`)
+
+		// Thinking text delta
+		thinkingEscaped := strings.ReplaceAll(thinkingText, `"`, `\"`)
+		thinkingEscaped = strings.ReplaceAll(thinkingEscaped, "\n", "\\n")
+		events = append(events, `event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"`+thinkingEscaped+`"}}`)
+
+		// Thinking signature
+		events = append(events, `event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"`+signature+`"}}`)
+
+		// Thinking content block stop
+		events = append(events, `event: content_block_stop
+data: {"type":"content_block_stop","index":0}`)
+
+		// Text content block start
+		events = append(events, `event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`)
+
+		// Text delta
+		events = append(events, `event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"This is the response after thinking."}}`)
+
+		// Text content block stop
+		events = append(events, `event: content_block_stop
+data: {"type":"content_block_stop","index":1}`)
+
+		// Message delta with end_turn stop reason
+		events = append(events, `event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":50}}`)
+
+		// Message stop event
+		events = append(events, `event: message_stop
+data: {"type":"message_stop"}`)
+
+		responseBody := []byte(strings.Join(events, "\n\n") + "\n\n")
 
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Status:     "200 OK",
 			Body:       io.NopCloser(bytes.NewReader(responseBody)),
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 		}
 	}
 }
