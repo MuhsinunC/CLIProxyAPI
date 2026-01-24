@@ -220,3 +220,8 @@ func (bt *BudgetTracker) Summary() string {
 		(bt.spentUSD/bt.budgetUSD)*100,
 		bt.requestCount, bt.maxRequests)
 }
+
+// RecordUsage is an alias for RecordRequest for API consistency.
+func (bt *BudgetTracker) RecordUsage(model string, promptTokens, completionTokens int) {
+	bt.RecordRequest(model, promptTokens, completionTokens)
+}
