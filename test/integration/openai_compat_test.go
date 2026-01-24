@@ -371,3 +371,229 @@ func TestOpenAI_Seed(t *testing.T) {
 	body := readResponseBody(t, resp)
 	assertJSONPathExists(t, body, "choices")
 }
+
+// TestOpenAI_MixedContentArray tests messages with mixed content types (text + image).
+func TestOpenAI_MixedContentArray(t *testing.T) {
+	ResetMockTransport()
+
+	// Create a tiny valid PNG (1x1 transparent pixel)
+	imageData := base64.StdEncoding.EncodeToString([]byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+	})
+
+	req := map[string]interface{}{
+		"model": "claude-sonnet-4-20250514",
+		"messages": []map[string]interface{}{
+			{
+				"role": "user",
+				"content": []map[string]interface{}{
+					{
+						"type": "text",
+						"text": "First text block",
+					},
+					{
+						"type": "image_url",
+						"image_url": map[string]interface{}{
+							"url": "data:image/png;base64," + imageData,
+						},
+					},
+					{
+						"type": "text",
+						"text": "Second text block after image",
+					},
+				},
+			},
+		},
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+
+	body := readResponseBody(t, resp)
+	assertJSONPathExists(t, body, "choices")
+}
+
+// TestOpenAI_NullContentField tests handling of null content field.
+func TestOpenAI_NullContentField(t *testing.T) {
+	ResetMockTransport()
+
+	// Message with tool_calls typically has null content
+	req := map[string]interface{}{
+		"model": "claude-sonnet-4-20250514",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Use a tool"},
+			{
+				"role":    "assistant",
+				"content": nil, // Explicit null
+				"tool_calls": []map[string]interface{}{
+					{
+						"id":   "call_test",
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      "test_tool",
+							"arguments": "{}",
+						},
+					},
+				},
+			},
+			{
+				"role":         "tool",
+				"tool_call_id": "call_test",
+				"content":      "result",
+			},
+		},
+		"tools": []map[string]interface{}{
+			buildToolDefinition("test_tool", "A test tool", map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			}),
+		},
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+
+	body := readResponseBody(t, resp)
+	assertJSONPathExists(t, body, "choices")
+}
+
+// TestOpenAI_EmptyContentField tests handling of empty string content.
+func TestOpenAI_EmptyContentField(t *testing.T) {
+	ResetMockTransport()
+
+	req := map[string]interface{}{
+		"model": "claude-sonnet-4-20250514",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": ""},
+			{"role": "user", "content": "Actual question"},
+		},
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	// May succeed or return error depending on implementation
+	_ = readResponseBody(t, resp)
+}
+
+// TestOpenAI_MultipleSystemMessages tests handling of multiple system messages.
+func TestOpenAI_MultipleSystemMessages(t *testing.T) {
+	ResetMockTransport()
+
+	req := map[string]interface{}{
+		"model": "claude-sonnet-4-20250514",
+		"messages": []map[string]interface{}{
+			{"role": "system", "content": "You are a helpful assistant."},
+			{"role": "system", "content": "Always be concise."},
+			{"role": "user", "content": "Hello"},
+		},
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+
+	body := readResponseBody(t, resp)
+	assertJSONPathExists(t, body, "choices")
+}
+
+// TestOpenAI_ContentArrayWithOnlyText tests content array with single text item.
+func TestOpenAI_ContentArrayWithOnlyText(t *testing.T) {
+	ResetMockTransport()
+
+	req := map[string]interface{}{
+		"model": "claude-sonnet-4-20250514",
+		"messages": []map[string]interface{}{
+			{
+				"role": "user",
+				"content": []map[string]interface{}{
+					{
+						"type": "text",
+						"text": "Hello, this is a text-only content array",
+					},
+				},
+			},
+		},
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+
+	body := readResponseBody(t, resp)
+	assertJSONPathExists(t, body, "choices")
+}
+
+// TestOpenAI_Logprobs tests the logprobs parameter.
+func TestOpenAI_Logprobs(t *testing.T) {
+	ResetMockTransport()
+
+	req := map[string]interface{}{
+		"model": "claude-sonnet-4-20250514",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Hello"},
+		},
+		"logprobs":    true,
+		"top_logprobs": 3,
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+
+	body := readResponseBody(t, resp)
+	assertJSONPathExists(t, body, "choices")
+}
+
+// TestOpenAI_ResponseFormatJSONSchema tests structured output with JSON schema.
+func TestOpenAI_ResponseFormatJSONSchema(t *testing.T) {
+	ResetMockTransport()
+
+	req := map[string]interface{}{
+		"model": "claude-sonnet-4-20250514",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Return a person object"},
+		},
+		"response_format": map[string]interface{}{
+			"type": "json_schema",
+			"json_schema": map[string]interface{}{
+				"name":   "person",
+				"strict": true,
+				"schema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"name": map[string]interface{}{"type": "string"},
+						"age":  map[string]interface{}{"type": "integer"},
+					},
+					"required": []string{"name", "age"},
+				},
+			},
+		},
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+
+	body := readResponseBody(t, resp)
+	assertJSONPathExists(t, body, "choices")
+}
+
+// TestOpenAI_ReasoningEffort tests the reasoning_effort parameter.
+func TestOpenAI_ReasoningEffort(t *testing.T) {
+	levels := []string{"low", "medium", "high"}
+
+	for _, level := range levels {
+		t.Run(level, func(t *testing.T) {
+			ResetMockTransport()
+
+			req := map[string]interface{}{
+				"model": "claude-sonnet-4-20250514",
+				"messages": []map[string]interface{}{
+					{"role": "user", "content": "What is 2+2?"},
+				},
+				"reasoning_effort": level,
+			}
+
+			resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+			assertStatusCode(t, resp, http.StatusOK)
+
+			body := readResponseBody(t, resp)
+			assertJSONPathExists(t, body, "choices")
+		})
+	}
+}

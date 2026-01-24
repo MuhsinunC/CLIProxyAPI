@@ -249,3 +249,378 @@ func TestGemini_ViaAnthropicEndpoint(t *testing.T) {
 	assertStatusCode(t, resp, http.StatusOK)
 	_ = readResponseBody(t, resp)
 }
+
+// ============================================================
+// Gemini Edge Case Tests
+// ============================================================
+
+// TestGemini_FlashLite tests with gemini-2.0-flash-lite model variant.
+// This test documents expected behavior - model may not be configured.
+func TestGemini_FlashLite(t *testing.T) {
+	ResetMockTransport()
+
+	req := buildChatRequest("gemini-2.0-flash-lite", "Hello")
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+
+	// Model may not be configured in test environment
+	if resp.StatusCode == http.StatusBadRequest {
+		body := readResponseBody(t, resp)
+		if gjson.GetBytes(body, "error.message").String() != "" {
+			t.Skip("Model gemini-2.0-flash-lite not configured in test environment")
+		}
+	}
+	assertStatusCode(t, resp, http.StatusOK)
+	body := readResponseBody(t, resp)
+	assertJSONPathExists(t, body, "choices")
+}
+
+// TestGemini_FlashPreview tests with gemini-2.5-flash-preview model variant.
+// This test documents expected behavior - model may not be configured.
+func TestGemini_FlashPreview(t *testing.T) {
+	ResetMockTransport()
+
+	req := buildChatRequest("gemini-2.5-flash-preview", "Hello")
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+
+	// Model may not be configured in test environment
+	if resp.StatusCode == http.StatusBadRequest {
+		body := readResponseBody(t, resp)
+		if gjson.GetBytes(body, "error.message").String() != "" {
+			t.Skip("Model gemini-2.5-flash-preview not configured in test environment")
+		}
+	}
+	assertStatusCode(t, resp, http.StatusOK)
+	body := readResponseBody(t, resp)
+	assertJSONPathExists(t, body, "choices")
+}
+
+// TestGemini_MultipleFunctionCalls tests multiple parallel function calls.
+func TestGemini_MultipleFunctionCalls(t *testing.T) {
+	ResetMockTransport()
+
+	// Configure mock to return a function call
+	if useMockLLM {
+		mockTransport.SetToolCallResponse("get_weather", map[string]interface{}{
+			"location": "NYC",
+		})
+	}
+
+	tools := []map[string]interface{}{
+		buildToolDefinition("get_weather", "Get weather", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"location": map[string]interface{}{"type": "string"},
+			},
+		}),
+	}
+
+	req := buildChatRequestWithTools("gemini-2.0-flash", "What's the weather in NYC and LA?", tools)
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+
+	body := readResponseBody(t, resp)
+	assertJSONPathExists(t, body, "choices")
+}
+
+// TestGemini_ToolResultFIFOMatching tests tool result FIFO matching for Gemini.
+// Gemini requires functionResponse order to match functionCall order.
+func TestGemini_ToolResultFIFOMatching(t *testing.T) {
+	ResetMockTransport()
+
+	tools := []map[string]interface{}{
+		buildToolDefinition("func_a", "Function A", map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		}),
+		buildToolDefinition("func_b", "Function B", map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		}),
+	}
+
+	// Simulate: Assistant called func_a then func_b
+	// User responds with results in correct order
+	req := map[string]interface{}{
+		"model": "gemini-2.0-flash",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Call both functions"},
+			{
+				"role":    "assistant",
+				"content": nil,
+				"tool_calls": []map[string]interface{}{
+					{
+						"id":   "call_1",
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      "func_a",
+							"arguments": "{}",
+						},
+					},
+					{
+						"id":   "call_2",
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      "func_b",
+							"arguments": "{}",
+						},
+					},
+				},
+			},
+			{
+				"role":         "tool",
+				"tool_call_id": "call_1",
+				"content":      "Result A",
+			},
+			{
+				"role":         "tool",
+				"tool_call_id": "call_2",
+				"content":      "Result B",
+			},
+		},
+		"tools": tools,
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+	_ = readResponseBody(t, resp)
+}
+
+// TestGemini_ImageContent tests image content with Gemini.
+func TestGemini_ImageContent(t *testing.T) {
+	ResetMockTransport()
+
+	// Create a tiny valid image placeholder
+	imageData := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+	req := map[string]interface{}{
+		"model": "gemini-2.0-flash",
+		"messages": []map[string]interface{}{
+			{
+				"role": "user",
+				"content": []map[string]interface{}{
+					{"type": "text", "text": "What's in this image?"},
+					{
+						"type": "image_url",
+						"image_url": map[string]interface{}{
+							"url": "data:image/png;base64," + imageData,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+	_ = readResponseBody(t, resp)
+}
+
+// TestGemini_LongConversation tests a longer conversation history.
+func TestGemini_LongConversation(t *testing.T) {
+	ResetMockTransport()
+
+	messages := []map[string]interface{}{}
+	for i := 0; i < 10; i++ {
+		messages = append(messages, map[string]interface{}{
+			"role":    "user",
+			"content": "User message " + string(rune('0'+i)),
+		})
+		messages = append(messages, map[string]interface{}{
+			"role":    "assistant",
+			"content": "Assistant response " + string(rune('0'+i)),
+		})
+	}
+	messages = append(messages, map[string]interface{}{
+		"role":    "user",
+		"content": "Final question",
+	})
+
+	req := map[string]interface{}{
+		"model":    "gemini-2.0-flash",
+		"messages": messages,
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+	_ = readResponseBody(t, resp)
+}
+
+// TestGemini_ToolChoiceAuto tests tool_choice auto with Gemini.
+func TestGemini_ToolChoiceAuto(t *testing.T) {
+	ResetMockTransport()
+
+	tools := []map[string]interface{}{
+		buildToolDefinition("search", "Search", map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		}),
+	}
+
+	req := map[string]interface{}{
+		"model": "gemini-2.0-flash",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Search for something"},
+		},
+		"tools":       tools,
+		"tool_choice": "auto",
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+	_ = readResponseBody(t, resp)
+}
+
+// TestGemini_ToolChoiceNone tests tool_choice none with Gemini.
+func TestGemini_ToolChoiceNone(t *testing.T) {
+	ResetMockTransport()
+
+	tools := []map[string]interface{}{
+		buildToolDefinition("search", "Search", map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		}),
+	}
+
+	req := map[string]interface{}{
+		"model": "gemini-2.0-flash",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Hello"},
+		},
+		"tools":       tools,
+		"tool_choice": "none",
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+	_ = readResponseBody(t, resp)
+}
+
+// TestGemini_MultipleStopSequences tests multiple stop sequences.
+func TestGemini_MultipleStopSequences(t *testing.T) {
+	ResetMockTransport()
+
+	req := map[string]interface{}{
+		"model": "gemini-2.0-flash",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Hello"},
+		},
+		"stop": []string{"END", "STOP", "DONE", "###"},
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+	_ = readResponseBody(t, resp)
+}
+
+// TestGemini_ZeroTemperature tests temperature=0 with Gemini.
+func TestGemini_ZeroTemperature(t *testing.T) {
+	ResetMockTransport()
+
+	req := map[string]interface{}{
+		"model": "gemini-2.0-flash",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "What is 2+2?"},
+		},
+		"temperature": 0,
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+	_ = readResponseBody(t, resp)
+}
+
+// TestGemini_HighTopK tests high top_k value with Gemini.
+func TestGemini_HighTopK(t *testing.T) {
+	ResetMockTransport()
+
+	req := map[string]interface{}{
+		"model": "gemini-2.0-flash",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Hello"},
+		},
+		"top_k": 100,
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+	_ = readResponseBody(t, resp)
+}
+
+// TestGemini_StreamWithTools tests streaming with tools enabled.
+func TestGemini_StreamWithTools(t *testing.T) {
+	ResetMockTransport()
+
+	tools := []map[string]interface{}{
+		buildToolDefinition("get_info", "Get info", map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		}),
+	}
+
+	req := map[string]interface{}{
+		"model": "gemini-2.0-flash",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Hello"},
+		},
+		"tools":  tools,
+		"stream": true,
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+
+	events := readSSEEvents(t, resp)
+	if len(events) == 0 {
+		t.Fatal("Expected at least one SSE event")
+	}
+}
+
+// TestGemini_JSONSchemaResponseFormat tests json_schema with Gemini.
+func TestGemini_JSONSchemaResponseFormat(t *testing.T) {
+	ResetMockTransport()
+
+	req := map[string]interface{}{
+		"model": "gemini-2.0-flash",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Return structured data"},
+		},
+		"response_format": map[string]interface{}{
+			"type": "json_schema",
+			"json_schema": map[string]interface{}{
+				"name": "my_response",
+				"schema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"answer": map[string]interface{}{"type": "string"},
+					},
+				},
+			},
+		},
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+	_ = readResponseBody(t, resp)
+}
+
+// TestGemini_ContentBlocksArray tests content as array with Gemini.
+func TestGemini_ContentBlocksArray(t *testing.T) {
+	ResetMockTransport()
+
+	req := map[string]interface{}{
+		"model": "gemini-2.0-flash",
+		"messages": []map[string]interface{}{
+			{
+				"role": "user",
+				"content": []map[string]interface{}{
+					{"type": "text", "text": "First part."},
+					{"type": "text", "text": "Second part."},
+				},
+			},
+		},
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+	_ = readResponseBody(t, resp)
+}
