@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,10 +11,15 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+
+	// Import builtin translators to register them with the default registry
+	_ "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator/builtin"
 )
 
 var (
@@ -95,6 +101,9 @@ func startTestServer() (*httptest.Server, *auth.Manager) {
 	}
 	authManager.SetConfig(cfg)
 
+	// Register mock credentials for testing
+	registerMockCredentials(authManager, cfg)
+
 	accessManager := sdkaccess.NewManager()
 
 	// Capture the gin.Engine via router configurator
@@ -113,6 +122,82 @@ func startTestServer() (*httptest.Server, *auth.Manager) {
 	// Create httptest server using the captured engine
 	ts := httptest.NewServer(engine)
 	return ts, authManager
+}
+
+// registerMockCredentials adds test credentials for each provider.
+func registerMockCredentials(authManager *auth.Manager, cfg *proxyconfig.Config) {
+	ctx := context.Background()
+
+	// Register executors for each provider
+	authManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
+	authManager.RegisterExecutor(executor.NewGeminiExecutor(cfg))
+	authManager.RegisterExecutor(executor.NewCodexExecutor(cfg))
+
+	// Register Claude/Anthropic credentials
+	claudeAuth := &auth.Auth{
+		ID:       "test-claude",
+		Provider: "claude",
+		Label:    "Test Claude",
+		Status:   auth.StatusActive,
+		Attributes: map[string]string{
+			"api_key": "test-anthropic-key",
+		},
+	}
+	authManager.Register(ctx, claudeAuth)
+
+	// Register Gemini credentials
+	geminiAuth := &auth.Auth{
+		ID:       "test-gemini",
+		Provider: "gemini",
+		Label:    "Test Gemini",
+		Status:   auth.StatusActive,
+		Attributes: map[string]string{
+			"api_key": "test-gemini-key",
+		},
+	}
+	authManager.Register(ctx, geminiAuth)
+
+	// Register OpenAI credentials
+	openaiAuth := &auth.Auth{
+		ID:       "test-openai",
+		Provider: "codex",
+		Label:    "Test OpenAI",
+		Status:   auth.StatusActive,
+		Attributes: map[string]string{
+			"api_key": "test-openai-key",
+		},
+	}
+	authManager.Register(ctx, openaiAuth)
+
+	// Register models with the global registry so provider lookup works
+	registerTestModels()
+}
+
+// registerTestModels registers test models with the global registry.
+func registerTestModels() {
+	reg := registry.GetGlobalRegistry()
+
+	// Register Claude models
+	claudeModels := []*registry.ModelInfo{
+		{ID: "claude-sonnet-4-20250514", Type: "claude", OwnedBy: "anthropic"},
+		{ID: "claude-3-5-sonnet-20241022", Type: "claude", OwnedBy: "anthropic"},
+		{ID: "claude-3-opus-20240229", Type: "claude", OwnedBy: "anthropic"},
+	}
+	reg.RegisterClient("test-claude", "claude", claudeModels)
+
+	// Register Gemini models
+	geminiModels := []*registry.ModelInfo{
+		{ID: "gemini-2.0-flash", Type: "gemini", OwnedBy: "google"},
+		{ID: "gemini-1.5-pro", Type: "gemini", OwnedBy: "google"},
+	}
+	reg.RegisterClient("test-gemini", "gemini", geminiModels)
+
+	// Register OpenAI models
+	openaiModels := []*registry.ModelInfo{
+		{ID: "gpt-4o", Type: "codex", OwnedBy: "openai"},
+		{ID: "gpt-4o-mini", Type: "codex", OwnedBy: "openai"},
+	}
+	reg.RegisterClient("test-openai", "codex", openaiModels)
 }
 
 // mockRoundTripperProvider implements auth.RoundTripperProvider for testing.
