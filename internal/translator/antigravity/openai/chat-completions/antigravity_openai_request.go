@@ -40,60 +40,14 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	re := gjson.GetBytes(rawJSON, "reasoning_effort")
 	if re.Exists() {
 		effort := strings.ToLower(strings.TrimSpace(re.String()))
-		if util.IsGemini3Model(modelName) {
-			switch effort {
-			case "none":
-				out, _ = sjson.DeleteBytes(out, "request.generationConfig.thinkingConfig")
-			case "auto":
-				includeThoughts := true
-				out = util.ApplyGeminiCLIThinkingLevel(out, "", &includeThoughts)
-			default:
-				if level, ok := util.ValidateGemini3ThinkingLevel(modelName, effort); ok {
-					out = util.ApplyGeminiCLIThinkingLevel(out, level, nil)
-				}
-			}
-		} else if !util.ModelUsesThinkingLevels(modelName) {
-			out = util.ApplyReasoningEffortToGeminiCLI(out, effort)
-		}
-	}
-
-	// Cherry Studio extension extra_body.google.thinking_config (effective only when official fields are absent)
-	// Only apply for models that use numeric budgets, not discrete levels.
-	if !hasOfficialThinking && util.ModelSupportsThinking(modelName) && !util.ModelUsesThinkingLevels(modelName) {
-		if tc := gjson.GetBytes(rawJSON, "extra_body.google.thinking_config"); tc.Exists() && tc.IsObject() {
-			var setBudget bool
-			var budget int
-
-			if v := tc.Get("thinkingBudget"); v.Exists() {
-				budget = int(v.Int())
-				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
-				setBudget = true
-			} else if v := tc.Get("thinking_budget"); v.Exists() {
-				budget = int(v.Int())
-				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
-				setBudget = true
-			}
-
-			if v := tc.Get("includeThoughts"); v.Exists() {
-				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", v.Bool())
-			} else if v := tc.Get("include_thoughts"); v.Exists() {
-				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", v.Bool())
-			} else if setBudget && budget != 0 {
-				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
-			}
-		}
-	}
-
-	// Claude/Anthropic API format: thinking.type == "enabled" with budget_tokens
-	// This allows Claude Code and other Claude API clients to pass thinking configuration
-	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig").Exists() && util.ModelSupportsThinking(modelName) {
-		if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() {
-			if t.Get("type").String() == "enabled" {
-				if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
-					budget := int(b.Int())
-					out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
-					out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
-				}
+		if effort != "" {
+			thinkingPath := "request.generationConfig.thinkingConfig"
+			if effort == "auto" {
+				out, _ = sjson.SetBytes(out, thinkingPath+".thinkingBudget", -1)
+				out, _ = sjson.SetBytes(out, thinkingPath+".includeThoughts", true)
+			} else {
+				out, _ = sjson.SetBytes(out, thinkingPath+".thinkingLevel", effort)
+				out, _ = sjson.SetBytes(out, thinkingPath+".includeThoughts", effort != "none")
 			}
 		}
 	}
@@ -168,19 +122,6 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						}
 					}
 				}
-				// Also check Claude-format: content array with type: "tool_use"
-				content := m.Get("content")
-				if content.IsArray() {
-					for _, item := range content.Array() {
-						if item.Get("type").String() == "tool_use" {
-							id := item.Get("id").String()
-							name := item.Get("name").String()
-							if id != "" && name != "" {
-								tcID2Name[id] = name
-							}
-						}
-					}
-				}
 			}
 		}
 
@@ -205,37 +146,24 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			content := m.Get("content")
 
 			if (role == "system" || role == "developer") && len(arr) > 1 {
-				// system -> request.systemInstruction parts
-				if content.Type == gjson.String && content.String() != "" {
-					p := 0
-					parts := gjson.GetBytes(out, "request.systemInstruction.parts")
-					if parts.IsArray() {
-						p = len(parts.Array())
-					}
-					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "system")
-					out, _ = sjson.SetBytes(out, "request.systemInstruction.parts."+itoa(p)+".text", content.String())
+				// system -> request.systemInstruction as a user message style
+				if content.Type == gjson.String {
+					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
+					out, _ = sjson.SetBytes(out, fmt.Sprintf("request.systemInstruction.parts.%d.text", systemPartIndex), content.String())
+					systemPartIndex++
 				} else if content.IsObject() && content.Get("type").String() == "text" {
-					p := 0
-					parts := gjson.GetBytes(out, "request.systemInstruction.parts")
-					if parts.IsArray() {
-						p = len(parts.Array())
-					}
-					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "system")
-					out, _ = sjson.SetBytes(out, "request.systemInstruction.parts."+itoa(p)+".text", content.Get("text").String())
+					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
+					out, _ = sjson.SetBytes(out, fmt.Sprintf("request.systemInstruction.parts.%d.text", systemPartIndex), content.Get("text").String())
+					systemPartIndex++
 				} else if content.IsArray() {
-					// Handle array content (Cursor sends tool docs as array of text parts)
-					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "system")
-					content.ForEach(func(_, part gjson.Result) bool {
-						if part.Get("type").String() == "text" {
-							p := 0
-							parts := gjson.GetBytes(out, "request.systemInstruction.parts")
-							if parts.IsArray() {
-								p = len(parts.Array())
-							}
-							out, _ = sjson.SetBytes(out, "request.systemInstruction.parts."+itoa(p)+".text", part.Get("text").String())
+					contents := content.Array()
+					if len(contents) > 0 {
+						out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
+						for j := 0; j < len(contents); j++ {
+							out, _ = sjson.SetBytes(out, fmt.Sprintf("request.systemInstruction.parts.%d.text", systemPartIndex), contents[j].Get("text").String())
+							systemPartIndex++
 						}
-						return true
-					})
+					}
 				}
 			} else if role == "user" || ((role == "system" || role == "developer") && len(arr) == 1) {
 				// Build single user content node to avoid splitting into multiple contents
@@ -280,26 +208,6 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							} else {
 								log.Warnf("Unknown file name extension '%s' in user message, skip", ext)
 							}
-						case "tool_result":
-							// Claude-format tool result: {type: "tool_result", tool_use_id: "...", content: "..."}
-							toolUseID := item.Get("tool_use_id").String()
-							resultContent := item.Get("content")
-							if toolUseID != "" {
-								funcName := tcID2Name[toolUseID]
-								if funcName == "" {
-									funcName = "unknown"
-								}
-								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionResponse.id", toolUseID)
-								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionResponse.name", funcName)
-								if resultContent.Type == gjson.String {
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionResponse.response.result", resultContent.String())
-								} else if resultContent.Type == gjson.JSON {
-									node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionResponse.response.result", []byte(resultContent.Raw))
-								} else {
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionResponse.response.result", "{}")
-								}
-								p++
-							}
 						}
 					}
 				}
@@ -311,32 +219,15 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					node, _ = sjson.SetBytes(node, "parts.-1.text", content.String())
 					p++
 				} else if content.IsArray() {
-					// Handle assistant content array (text, tool_use, and image_url)
+					// Assistant multimodal content (e.g. text + image) -> single model content with parts
 					for _, item := range content.Array() {
-						itemType := item.Get("type").String()
-						switch itemType {
+						switch item.Get("type").String() {
 						case "text":
-							textContent := item.Get("text").String()
-							if textContent != "" {
-								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", textContent)
-								p++
+							text := item.Get("text").String()
+							if text != "" {
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", text)
 							}
-						case "tool_use":
-							// Convert Claude tool_use to functionCall
-							tuID := item.Get("id").String()
-							tuName := item.Get("name").String()
-							tuInput := item.Get("input")
-							if tuID != "" && tuName != "" {
-								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.id", tuID)
-								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.name", tuName)
-								if tuInput.Exists() {
-									node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionCall.args", []byte(tuInput.Raw))
-								} else {
-									node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionCall.args", []byte("{}"))
-								}
-								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature)
-								p++
-							}
+							p++
 						case "image_url":
 							// If the assistant returned an inline data URL, preserve it for history fidelity.
 							imageURL := item.Get("image_url.url").String()
@@ -468,31 +359,6 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					functionToolNode = tmp
 					hasFunction = true
 				}
-			} else if t.Get("name").Exists() && (t.Get("input_schema").Exists() || t.Get("type").String() == "custom") {
-				// Cursor-style tool format: {"name": "...", "input_schema": {...}} (no type:function wrapper)
-				// Also handles Claude API custom tools with type: "custom"
-				fnRaw := `{"name":"","parametersJsonSchema":{}}`
-				fnRaw, _ = sjson.Set(fnRaw, "name", t.Get("name").String())
-				if desc := t.Get("description"); desc.Exists() {
-					fnRaw, _ = sjson.Set(fnRaw, "description", desc.String())
-				}
-
-				// Handle input_schema -> parametersJsonSchema
-				if schema := t.Get("input_schema"); schema.Exists() {
-					fnRaw, _ = sjson.SetRaw(fnRaw, "parametersJsonSchema", schema.Raw)
-				}
-
-				if !hasFunction {
-					toolNode, _ = sjson.SetRawBytes(toolNode, "functionDeclarations", []byte("[]"))
-				}
-				tmp, errSet := sjson.SetRawBytes(toolNode, "functionDeclarations.-1", []byte(fnRaw))
-				if errSet != nil {
-					log.Warnf("Failed to append Cursor-style tool declaration for '%s': %v", t.Get("name").String(), errSet)
-					continue
-				}
-				toolNode = tmp
-				hasFunction = true
-				hasTool = true
 			}
 			if gs := t.Get("google_search"); gs.Exists() {
 				googleToolNode := []byte(`{}`)

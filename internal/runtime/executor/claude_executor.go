@@ -15,7 +15,6 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -33,27 +32,14 @@ import (
 // ClaudeExecutor is a stateless executor for Anthropic Claude over the messages API.
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type ClaudeExecutor struct {
-	cfg           *config.Config
-	thinkingCache *cache.ThinkingCache
+	cfg *config.Config
 }
 
 const claudeToolPrefix = "proxy_"
 
-func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor {
-	// Get singleton thinking cache instance
-	thinkingCache, err := cache.GetThinkingCache(cfg.ThinkingCache)
-	if err != nil {
-		log.Warnf("[CLAUDE-EXECUTOR] Failed to initialize thinking cache: %v", err)
-	}
-	return &ClaudeExecutor{cfg: cfg, thinkingCache: thinkingCache}
-}
+func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
-
-// enableToolLoopThinkingCache controls whether we use the thinking cache to inject
-// cached thinking blocks in tool loops. When disabled, we fallback to disabling thinking.
-// Set to true to enable cached thinking blocks across tool loops.
-const enableToolLoopThinkingCache = true
 
 // PrepareRequest injects Claude credentials into the outgoing HTTP request.
 func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
@@ -133,32 +119,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
-
-	// Ensure max_tokens > thinking.budget_tokens when thinking is enabled
-	body = ensureMaxTokensForThinking(model, body)
-
-	// Log thinking state before potential disable
-	thinkingBefore := gjson.GetBytes(body, "thinking.type").String()
-	if thinkingBefore == "enabled" {
-		fmt.Printf("[CLAUDE-EXECUTOR] THINKING: ENABLED (budget=%d) for model=%s\n",
-			gjson.GetBytes(body, "thinking.budget_tokens").Int(), req.Model)
-	} else {
-		fmt.Printf("[CLAUDE-EXECUTOR] THINKING: NOT ENABLED for model=%s\n", req.Model)
-	}
-
-	// Handle thinking in tool loops (inject cached blocks or disable thinking)
-	// (Claude requires thinking blocks before tool_use in assistant messages)
-	// Save original messages BEFORE modification for cache key generation
-	originalMessagesForCacheNonStream := gjson.GetBytes(body, "messages").Raw
-	if enableToolLoopThinkingCache {
-		body = e.handleToolLoopThinking(body)
-	}
-
-	// Log if thinking was disabled by tool loop detection
-	thinkingAfter := gjson.GetBytes(body, "thinking.type").String()
-	if thinkingBefore == "enabled" && thinkingAfter != "enabled" {
-		fmt.Printf("[CLAUDE-EXECUTOR] THINKING: DISABLED (tool loop detected - missing thinking blocks)\n")
-	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -242,11 +202,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if isClaudeOAuthToken(apiKey) {
 		data = stripClaudeToolPrefixFromResponse(data, claudeToolPrefix)
 	}
-
-	// Cache thinking blocks from response for future tool loop requests
-	// Use original messages (before any injection) for consistent cache key
-	e.cacheThinkingFromResponseWithMessages(data, originalMessagesForCacheNonStream)
-
 	var param any
 	out := sdktranslator.TranslateNonStream(
 		ctx,
@@ -296,32 +251,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
-
-	// Ensure max_tokens > thinking.budget_tokens when thinking is enabled
-	body = ensureMaxTokensForThinking(model, body)
-
-	// Log thinking state before potential disable
-	thinkingBefore := gjson.GetBytes(body, "thinking.type").String()
-	if thinkingBefore == "enabled" {
-		fmt.Printf("[CLAUDE-EXECUTOR-STREAM] THINKING: ENABLED (budget=%d) for model=%s\n",
-			gjson.GetBytes(body, "thinking.budget_tokens").Int(), req.Model)
-	} else {
-		fmt.Printf("[CLAUDE-EXECUTOR-STREAM] THINKING: NOT ENABLED for model=%s\n", req.Model)
-	}
-
-	// Handle thinking in tool loops (inject cached blocks or disable thinking)
-	// (Claude requires thinking blocks before tool_use in assistant messages)
-	// Save original messages BEFORE modification for cache key generation
-	originalMessagesForCache := gjson.GetBytes(body, "messages").Raw
-	if enableToolLoopThinkingCache {
-		body = e.handleToolLoopThinking(body)
-	}
-
-	// Log if thinking was disabled by tool loop detection
-	thinkingAfter := gjson.GetBytes(body, "thinking.type").String()
-	if thinkingBefore == "enabled" && thinkingAfter != "enabled" {
-		fmt.Printf("[CLAUDE-EXECUTOR-STREAM] THINKING: DISABLED (tool loop detected - missing thinking blocks)\n")
-	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -422,12 +351,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		scanner := bufio.NewScanner(decodedBody)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
-
-		// Track thinking blocks for signature capture (content not needed for cache)
-		var thinkingSignature string
-		inThinking := false
-		var pendingThinkingBlock string
-
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
@@ -437,46 +360,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if isClaudeOAuthToken(apiKey) {
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
 			}
-
-			// Track thinking signature for caching (we don't need the actual thinking text)
-			if e.thinkingCache != nil && bytes.HasPrefix(line, []byte("data:")) {
-				eventData := bytes.TrimSpace(line[5:]) // Strip "data:" prefix and whitespace
-				eventType := gjson.GetBytes(eventData, "type").String()
-
-				switch eventType {
-				case "content_block_start":
-					blockType := gjson.GetBytes(eventData, "content_block.type").String()
-					if blockType == "thinking" {
-						inThinking = true
-						thinkingSignature = "" // Reset for new thinking block
-					}
-				case "content_block_delta":
-					if inThinking {
-						// Only capture signature, ignore thinking content
-						deltaType := gjson.GetBytes(eventData, "delta.type").String()
-						if deltaType == "signature_delta" {
-							thinkingSignature = gjson.GetBytes(eventData, "delta.signature").String()
-						}
-					}
-				case "content_block_stop":
-					if inThinking && thinkingSignature != "" {
-						// Store ONLY the signature - Claude only needs this for tool loops
-						// The actual thinking text is not needed, saving 80-90% storage
-						pendingThinkingBlock = fmt.Sprintf(`{"type":"thinking","thinking":"","signature":%q}`,
-							thinkingSignature)
-						inThinking = false
-					}
-				case "message_stop":
-					// Only cache if there was a tool_use in this response
-					if pendingThinkingBlock != "" {
-						// Cache thinking for ALL responses (not just tool_use)
-						// This allows injecting into all assistants on future tool loop requests
-						e.cacheThinkingFromStreamAccumWithMessages(originalMessagesForCache, []byte(pendingThinkingBlock))
-						log.Debugf("[CLAUDE-EXECUTOR-STREAM] Cached thinking block for future use")
-					}
-				}
-			}
-
 			chunks := sdktranslator.TranslateStream(
 				ctx,
 				to,
@@ -943,246 +826,162 @@ func stripClaudeToolPrefixFromStreamLine(line []byte, prefix string) []byte {
 	return updated
 }
 
-// handleToolLoopThinking handles thinking blocks in tool loop scenarios.
-// It detects if we're in a tool loop (last user message contains tool_result) and:
-// 1. If cached thinking blocks exist, injects them into assistant messages
-// 2. If no cache hit, falls back to disabling thinking (to avoid Claude API errors)
-// This enables Claude extended thinking to work across tool loops even when
-// clients like Cursor don't forward reasoning_content.
-func (e *ClaudeExecutor) handleToolLoopThinking(payload []byte) []byte {
-	// Check if thinking is enabled
-	thinkingType := gjson.GetBytes(payload, "thinking.type").String()
-	if thinkingType != "enabled" {
-		return payload
+// getClientUserAgent extracts the client User-Agent from the gin context.
+func getClientUserAgent(ctx context.Context) string {
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		return ginCtx.GetHeader("User-Agent")
+	}
+	return ""
+}
+
+// getCloakConfigFromAuth extracts cloak configuration from auth attributes.
+// Returns (cloakMode, strictMode, sensitiveWords).
+func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string) {
+	if auth == nil || auth.Attributes == nil {
+		return "auto", false, nil
 	}
 
-	// Check if we're in a tool loop (last user message contains tool_result)
-	messages := gjson.GetBytes(payload, "messages")
-	if !messages.IsArray() {
-		return payload
+	cloakMode := auth.Attributes["cloak_mode"]
+	if cloakMode == "" {
+		cloakMode = "auto"
 	}
 
-	// Find the last user message
-	var lastUserContent gjson.Result
-	messages.ForEach(func(_, msg gjson.Result) bool {
-		if msg.Get("role").String() == "user" {
-			lastUserContent = msg.Get("content")
-		}
-		return true
-	})
+	strictMode := strings.ToLower(auth.Attributes["cloak_strict_mode"]) == "true"
 
-	if !lastUserContent.IsArray() {
-		return payload
+	var sensitiveWords []string
+	if wordsStr := auth.Attributes["cloak_sensitive_words"]; wordsStr != "" {
+		sensitiveWords = strings.Split(wordsStr, ",")
+		for i := range sensitiveWords {
+			sensitiveWords[i] = strings.TrimSpace(sensitiveWords[i])
+		}
 	}
 
-	// Check if last user message contains tool_result
-	isInsideToolLoop := false
-	lastUserContent.ForEach(func(_, block gjson.Result) bool {
-		if block.Get("type").String() == "tool_result" {
-			isInsideToolLoop = true
-			return false // stop iteration
-		}
-		return true
-	})
+	return cloakMode, strictMode, sensitiveWords
+}
 
-	if !isInsideToolLoop {
-		return payload
+// resolveClaudeKeyCloakConfig finds the matching ClaudeKey config and returns its CloakConfig.
+func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config.CloakConfig {
+	if cfg == nil || auth == nil {
+		return nil
 	}
 
-	// We're in a tool loop - check if assistant messages have thinking blocks
-	// Claude requires: if ANY assistant has thinking, ALL must have thinking first
-	// Track all assistants that lack thinking blocks
-	var assistantsWithoutThinking []int
+	apiKey, baseURL := claudeCreds(auth)
+	if apiKey == "" {
+		return nil
+	}
 
-	msgArray := messages.Array()
-	for i, msg := range msgArray {
-		if msg.Get("role").String() != "assistant" {
-			continue
-		}
+	for i := range cfg.ClaudeKey {
+		entry := &cfg.ClaudeKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
 
-		content := msg.Get("content")
-		if !content.IsArray() {
-			continue
-		}
-
-		hasThinking := false
-		content.ForEach(func(_, block gjson.Result) bool {
-			blockType := block.Get("type").String()
-			if blockType == "thinking" || blockType == "redacted_thinking" {
-				hasThinking = true
-				return false // stop
+		// Match by API key
+		if strings.EqualFold(cfgKey, apiKey) {
+			// If baseURL is specified, also check it
+			if baseURL != "" && cfgBase != "" && !strings.EqualFold(cfgBase, baseURL) {
+				continue
 			}
-			return true
-		})
-
-		if !hasThinking {
-			assistantsWithoutThinking = append(assistantsWithoutThinking, i)
+			return entry.Cloak
 		}
 	}
 
-	// If all assistant messages already have thinking, no action needed
-	if len(assistantsWithoutThinking) == 0 {
+	return nil
+}
+
+// injectFakeUserID generates and injects a fake user ID into the request metadata.
+func injectFakeUserID(payload []byte) []byte {
+	metadata := gjson.GetBytes(payload, "metadata")
+	if !metadata.Exists() {
+		payload, _ = sjson.SetBytes(payload, "metadata.user_id", generateFakeUserID())
 		return payload
 	}
 
-	// Try to inject cached thinking into ALL assistants that lack it
-	// For each assistant at index I, the cache key = hash(messages[0:I])
-	if e.thinkingCache == nil {
-		// Can't inject without cache, disable thinking
-		fmt.Printf("[THINKING-CACHE] SKIP: no cache available - disabling thinking\n")
-		payload, _ = sjson.DeleteBytes(payload, "thinking")
-		return payload
+	existingUserID := gjson.GetBytes(payload, "metadata.user_id").String()
+	if existingUserID == "" || !isValidUserID(existingUserID) {
+		payload, _ = sjson.SetBytes(payload, "metadata.user_id", generateFakeUserID())
 	}
-
-	allInjected := true
-	for _, assistantIdx := range assistantsWithoutThinking {
-		// Generate stable cache key using message count + assistant index + user text content
-		// This is stable across JSON formatting variations between Cursor requests
-		convID := cache.GenerateStableConversationID([]byte(messages.Raw), assistantIdx)
-
-		if cachedThinking, found := e.thinkingCache.Get(convID); found {
-			// Parse the cached thinking block
-			thinkingBlock := gjson.ParseBytes(cachedThinking)
-			if thinkingBlock.Exists() {
-				// Inject thinking block at the beginning of this assistant's content
-				assistantPath := fmt.Sprintf("messages.%d.content", assistantIdx)
-				existingContent := gjson.GetBytes(payload, assistantPath)
-				if existingContent.IsArray() {
-					// Prepend thinking block to content array
-					newContent := "[" + thinkingBlock.Raw + "," + existingContent.Raw[1:]
-					payload, _ = sjson.SetRawBytes(payload, assistantPath, []byte(newContent))
-					fmt.Printf("[THINKING-CACHE] INJECT: msg[%d] conversation=%s size=%d bytes\n", assistantIdx, convID[:8], len(cachedThinking))
-				} else {
-					fmt.Printf("[THINKING-CACHE] MISS: msg[%d] conversation=%s - content not array\n", assistantIdx, convID[:8])
-					allInjected = false
-				}
-			} else {
-				fmt.Printf("[THINKING-CACHE] MISS: msg[%d] conversation=%s - invalid cached block\n", assistantIdx, convID[:8])
-				allInjected = false
-			}
-		} else {
-			fmt.Printf("[THINKING-CACHE] MISS: msg[%d] conversation=%s - not in cache\n", assistantIdx, convID[:8])
-			allInjected = false
-		}
-	}
-
-	if allInjected {
-		// Successfully injected into all assistants
-		return payload
-	}
-
-	// Failed to inject into some assistants - disable thinking to avoid API error
-	fmt.Printf("[THINKING-CACHE] FALLBACK: could not inject into all assistants - disabling thinking\n")
-	payload, _ = sjson.DeleteBytes(payload, "thinking")
 	return payload
 }
 
-// cacheThinkingFromResponse extracts and caches thinking blocks from a Claude response.
-// This is called after receiving a response to cache thinking for future tool loop requests.
-func (e *ClaudeExecutor) cacheThinkingFromResponse(responseBody []byte, requestPayload []byte) {
-	if e.thinkingCache == nil {
-		return
+// checkSystemInstructionsWithMode injects Claude Code system prompt.
+// In strict mode, it replaces all user system messages.
+// In non-strict mode (default), it prepends to existing system messages.
+func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
+	system := gjson.GetBytes(payload, "system")
+	claudeCodeInstructions := `[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}]`
+
+	if strictMode {
+		// Strict mode: replace all system messages with Claude Code prompt only
+		payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
+		return payload
 	}
 
-	// Extract thinking block from response content
-	content := gjson.GetBytes(responseBody, "content")
-	if !content.IsArray() {
-		return
-	}
-
-	var thinkingBlock gjson.Result
-	content.ForEach(func(_, block gjson.Result) bool {
-		blockType := block.Get("type").String()
-		if blockType == "thinking" || blockType == "redacted_thinking" {
-			thinkingBlock = block
-			return false // stop, found it
+	// Non-strict mode (default): prepend Claude Code prompt to existing system messages
+	if system.IsArray() {
+		if gjson.GetBytes(payload, "system.0.text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
+			system.ForEach(func(_, part gjson.Result) bool {
+				if part.Get("type").String() == "text" {
+					claudeCodeInstructions, _ = sjson.SetRaw(claudeCodeInstructions, "-1", part.Raw)
+				}
+				return true
+			})
+			payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
 		}
-		return true
-	})
-
-	if !thinkingBlock.Exists() {
-		return // No thinking block in response
+	} else {
+		payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
 	}
-
-	// Generate conversation ID from request messages
-	messages := gjson.GetBytes(requestPayload, "messages")
-	if !messages.Exists() {
-		return
-	}
-
-	convID := cache.GenerateConversationID([]byte(messages.Raw))
-	e.thinkingCache.Set(convID, []byte(thinkingBlock.Raw))
-	log.Debugf("[CLAUDE-EXECUTOR] Cached thinking block for conversation %s (size=%d bytes)", convID, len(thinkingBlock.Raw))
+	return payload
 }
 
-// cacheThinkingFromResponseWithMessages extracts and caches thinking blocks using pre-extracted messages JSON.
-// This is used when we need to cache with the original messages (before any injection modifications).
-func (e *ClaudeExecutor) cacheThinkingFromResponseWithMessages(responseBody []byte, messagesJSON string) {
-	if e.thinkingCache == nil {
-		return
-	}
-	if messagesJSON == "" {
-		return
+// applyCloaking applies cloaking transformations to the payload based on config and client.
+// Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
+func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string) []byte {
+	clientUserAgent := getClientUserAgent(ctx)
+
+	// Get cloak config from ClaudeKey configuration
+	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
+
+	// Determine cloak settings
+	var cloakMode string
+	var strictMode bool
+	var sensitiveWords []string
+
+	if cloakCfg != nil {
+		cloakMode = cloakCfg.Mode
+		strictMode = cloakCfg.StrictMode
+		sensitiveWords = cloakCfg.SensitiveWords
 	}
 
-	// Extract thinking block from response content
-	content := gjson.GetBytes(responseBody, "content")
-	if !content.IsArray() {
-		return
-	}
-
-	var thinkingBlock gjson.Result
-	content.ForEach(func(_, block gjson.Result) bool {
-		blockType := block.Get("type").String()
-		if blockType == "thinking" || blockType == "redacted_thinking" {
-			thinkingBlock = block
-			return false // stop, found it
+	// Fallback to auth attributes if no config found
+	if cloakMode == "" {
+		attrMode, attrStrict, attrWords := getCloakConfigFromAuth(auth)
+		cloakMode = attrMode
+		if !strictMode {
+			strictMode = attrStrict
 		}
-		return true
-	})
-
-	if !thinkingBlock.Exists() {
-		return // No thinking block in response
+		if len(sensitiveWords) == 0 {
+			sensitiveWords = attrWords
+		}
 	}
 
-	// At storage time, the assistant's index will be len(messages) - it's the next message after the request
-	assistantIdx := int(gjson.Get(messagesJSON, "#").Int())
-	convID := cache.GenerateStableConversationID([]byte(messagesJSON), assistantIdx)
-	e.thinkingCache.Set(convID, []byte(thinkingBlock.Raw))
-}
-
-// cacheThinkingFromStreamAccum caches a pre-built thinking block from streaming accumulation.
-// This is called after accumulating thinking_delta events in the streaming path.
-func (e *ClaudeExecutor) cacheThinkingFromStreamAccum(requestPayload []byte, thinkingBlock []byte) {
-	if e.thinkingCache == nil {
-		return
+	// Determine if cloaking should be applied
+	if !shouldCloak(cloakMode, clientUserAgent) {
+		return payload
 	}
 
-	// Generate conversation ID from request messages
-	messages := gjson.GetBytes(requestPayload, "messages")
-	if !messages.Exists() {
-		return
+	// Skip system instructions for claude-3-5-haiku models
+	if !strings.HasPrefix(model, "claude-3-5-haiku") {
+		payload = checkSystemInstructionsWithMode(payload, strictMode)
 	}
 
-	// At storage time, the assistant's index will be len(messages) - it's the next message after the request
-	assistantIdx := int(gjson.GetBytes(requestPayload, "messages.#").Int())
-	convID := cache.GenerateStableConversationID([]byte(messages.Raw), assistantIdx)
-	e.thinkingCache.Set(convID, thinkingBlock)
-	log.Debugf("[CLAUDE-EXECUTOR-STREAM] Cached thinking block for conversation %s (size=%d bytes)", convID, len(thinkingBlock))
-}
+	// Inject fake user ID
+	payload = injectFakeUserID(payload)
 
-// cacheThinkingFromStreamAccumWithMessages caches a thinking block using pre-extracted messages JSON.
-// This is used when we need to cache with the original messages (before any injection modifications).
-func (e *ClaudeExecutor) cacheThinkingFromStreamAccumWithMessages(messagesJSON string, thinkingBlock []byte) {
-	if e.thinkingCache == nil {
-		return
-	}
-	if messagesJSON == "" {
-		return
+	// Apply sensitive word obfuscation
+	if len(sensitiveWords) > 0 {
+		matcher := buildSensitiveWordMatcher(sensitiveWords)
+		payload = obfuscateSensitiveWords(payload, matcher)
 	}
 
-	// At storage time, the assistant's index will be len(messages) - it's the next message after the request
-	assistantIdx := int(gjson.Get(messagesJSON, "#").Int())
-	convID := cache.GenerateStableConversationID([]byte(messagesJSON), assistantIdx)
-	e.thinkingCache.Set(convID, thinkingBlock)
+	return payload
 }
