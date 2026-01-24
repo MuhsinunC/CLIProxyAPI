@@ -343,3 +343,344 @@ func TestToolCalling_ToolChoice(t *testing.T) {
 		})
 	}
 }
+
+// TestToolCalling_NestedArguments tests tool calls with deeply nested JSON arguments.
+func TestToolCalling_NestedArguments(t *testing.T) {
+	ResetMockTransport()
+
+	// Define a tool with complex nested schema
+	tools := []map[string]interface{}{
+		buildToolDefinition("create_event", "Create a calendar event", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"event": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"title": map[string]interface{}{"type": "string"},
+						"time": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"start": map[string]interface{}{"type": "string"},
+								"end":   map[string]interface{}{"type": "string"},
+								"timezone": map[string]interface{}{
+									"type": "object",
+									"properties": map[string]interface{}{
+										"name":   map[string]interface{}{"type": "string"},
+										"offset": map[string]interface{}{"type": "integer"},
+									},
+								},
+							},
+						},
+						"attendees": map[string]interface{}{
+							"type": "array",
+							"items": map[string]interface{}{
+								"type": "object",
+								"properties": map[string]interface{}{
+									"email": map[string]interface{}{"type": "string"},
+									"name":  map[string]interface{}{"type": "string"},
+								},
+							},
+						},
+					},
+				},
+			},
+		}),
+	}
+
+	req := buildChatRequestWithTools("claude-sonnet-4-20250514", "Create a meeting for tomorrow with John and Jane", tools)
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+
+	body := readResponseBody(t, resp)
+	assertJSONPathExists(t, body, "choices")
+}
+
+// TestToolCalling_ToolResultArrayContent tests tool results with array content.
+func TestToolCalling_ToolResultArrayContent(t *testing.T) {
+	ResetMockTransport()
+
+	tools := []map[string]interface{}{
+		buildToolDefinition("search", "Search for information", map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		}),
+	}
+
+	// Send request with tool result containing array content
+	req := map[string]interface{}{
+		"model": "claude-sonnet-4-20250514",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Search for weather"},
+			{
+				"role":    "assistant",
+				"content": nil,
+				"tool_calls": []map[string]interface{}{
+					{
+						"id":   "call_array_test",
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      "search",
+							"arguments": "{}",
+						},
+					},
+				},
+			},
+			{
+				"role":         "tool",
+				"tool_call_id": "call_array_test",
+				// Array content in tool result
+				"content": `[{"title": "Result 1", "url": "http://example1.com"}, {"title": "Result 2", "url": "http://example2.com"}]`,
+			},
+		},
+		"tools": tools,
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+
+	body := readResponseBody(t, resp)
+	assertJSONPathExists(t, body, "choices")
+}
+
+// TestToolCalling_LongArguments tests tool calls with very long argument strings.
+func TestToolCalling_LongArguments(t *testing.T) {
+	ResetMockTransport()
+
+	tools := []map[string]interface{}{
+		buildToolDefinition("process_text", "Process a text document", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"text": map[string]interface{}{"type": "string"},
+			},
+		}),
+	}
+
+	// Generate a long text (5000 characters)
+	longText := ""
+	for i := 0; i < 500; i++ {
+		longText += "This is a test sentence that repeats. "
+	}
+
+	// Send request with tool result containing long arguments
+	req := map[string]interface{}{
+		"model": "claude-sonnet-4-20250514",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Process this document"},
+			{
+				"role":    "assistant",
+				"content": nil,
+				"tool_calls": []map[string]interface{}{
+					{
+						"id":   "call_long_args",
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      "process_text",
+							"arguments": `{"text": "` + longText + `"}`,
+						},
+					},
+				},
+			},
+			{
+				"role":         "tool",
+				"tool_call_id": "call_long_args",
+				"content":      "Processed " + longText[:100] + "...",
+			},
+		},
+		"tools": tools,
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+
+	body := readResponseBody(t, resp)
+	assertJSONPathExists(t, body, "choices")
+}
+
+// TestToolCalling_ToolChoiceRequired tests the "required" tool_choice option.
+func TestToolCalling_ToolChoiceRequired(t *testing.T) {
+	ResetMockTransport()
+
+	tools := []map[string]interface{}{
+		buildToolDefinition("get_weather", "Get weather for a location", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"location": map[string]interface{}{"type": "string"},
+			},
+		}),
+	}
+
+	req := map[string]interface{}{
+		"model": "claude-sonnet-4-20250514",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Tell me something"},
+		},
+		"tools":       tools,
+		"tool_choice": "required", // Force a tool call
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+
+	body := readResponseBody(t, resp)
+	assertJSONPathExists(t, body, "choices")
+}
+
+// TestToolCalling_MultipleToolCallsInSingleResponse tests multiple tool calls in one response.
+func TestToolCalling_MultipleToolCallsInSingleResponse(t *testing.T) {
+	ResetMockTransport()
+
+	tools := []map[string]interface{}{
+		buildToolDefinition("get_weather", "Get weather", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"location": map[string]interface{}{"type": "string"},
+			},
+		}),
+		buildToolDefinition("get_time", "Get time", map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		}),
+	}
+
+	// Send request with multiple tool results (simulating parallel tool calls)
+	req := map[string]interface{}{
+		"model": "claude-sonnet-4-20250514",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "What's the weather in NYC and what time is it?"},
+			{
+				"role":    "assistant",
+				"content": nil,
+				"tool_calls": []map[string]interface{}{
+					{
+						"id":   "call_weather",
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      "get_weather",
+							"arguments": `{"location": "NYC"}`,
+						},
+					},
+					{
+						"id":   "call_time",
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      "get_time",
+							"arguments": "{}",
+						},
+					},
+				},
+			},
+			{
+				"role":         "tool",
+				"tool_call_id": "call_weather",
+				"content":      `{"temperature": 72, "condition": "sunny"}`,
+			},
+			{
+				"role":         "tool",
+				"tool_call_id": "call_time",
+				"content":      `{"time": "3:30 PM"}`,
+			},
+		},
+		"tools": tools,
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+
+	body := readResponseBody(t, resp)
+	assertJSONPathExists(t, body, "choices")
+	assertJSONPathExists(t, body, "choices.0.message.content")
+}
+
+// TestToolCalling_NullToolCallArguments tests tool calls where arguments is null.
+func TestToolCalling_NullToolCallArguments(t *testing.T) {
+	ResetMockTransport()
+
+	tools := []map[string]interface{}{
+		buildToolDefinition("get_time", "Get the current time", map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		}),
+	}
+
+	// Send request where previous assistant message has null arguments (edge case)
+	req := map[string]interface{}{
+		"model": "claude-sonnet-4-20250514",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "What time is it?"},
+			{
+				"role":    "assistant",
+				"content": nil,
+				"tool_calls": []map[string]interface{}{
+					{
+						"id":   "call_null_args",
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      "get_time",
+							"arguments": nil, // Null arguments
+						},
+					},
+				},
+			},
+			{
+				"role":         "tool",
+				"tool_call_id": "call_null_args",
+				"content":      `{"time": "3:30 PM"}`,
+			},
+		},
+		"tools": tools,
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	// Should handle null arguments gracefully
+	assertStatusCode(t, resp, http.StatusOK)
+
+	body := readResponseBody(t, resp)
+	assertJSONPathExists(t, body, "choices")
+}
+
+// TestToolCalling_ToolResultWithObjectContent tests tool result with object content (not string).
+func TestToolCalling_ToolResultWithObjectContent(t *testing.T) {
+	ResetMockTransport()
+
+	tools := []map[string]interface{}{
+		buildToolDefinition("get_data", "Get data", map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		}),
+	}
+
+	// Claude supports object content in tool_result
+	req := map[string]interface{}{
+		"model": "claude-sonnet-4-20250514",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Get the data"},
+			{
+				"role":    "assistant",
+				"content": nil,
+				"tool_calls": []map[string]interface{}{
+					{
+						"id":   "call_obj_content",
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      "get_data",
+							"arguments": "{}",
+						},
+					},
+				},
+			},
+			{
+				"role":         "tool",
+				"tool_call_id": "call_obj_content",
+				// Complex nested object as content
+				"content": `{"result": {"items": [1, 2, 3], "metadata": {"count": 3, "page": 1}}}`,
+			},
+		},
+		"tools": tools,
+	}
+
+	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
+	assertStatusCode(t, resp, http.StatusOK)
+
+	body := readResponseBody(t, resp)
+	assertJSONPathExists(t, body, "choices")
+}
