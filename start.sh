@@ -8,6 +8,7 @@
 #   ./start.sh              # Build from source and start with ngrok (default)
 #   ./start.sh --brew       # Use brew version instead of building from source
 #   ./start.sh --no-ngrok   # Start without ngrok (localhost only)
+#   ./start.sh --webui-dev  # Enable WebUI hot-reload mode (uses vite dev server)
 #   ./start.sh --stop       # Stop any running server processes
 #   ./start.sh --brew --no-ngrok  # Brew version, no ngrok
 #
@@ -17,6 +18,8 @@
 #   PORT=                   # Override port (reads from config.yaml by default)
 #   CLIPROXY_BIN=           # Path to cliproxyapi binary
 #   NGROK_BIN=              # Path to ngrok binary
+#   WEBUI_DIR=              # Path to WebUI project (default: ../Cli-Proxy-API-Management-Center)
+#   WEBUI_PORT=             # WebUI port (default: 5173)
 #
 # ============================================
 
@@ -34,8 +37,15 @@ NGROK_CONFIG_DEFAULT="$HOME/Library/Application Support/ngrok/ngrok.yml"
 NGROK_CONFIG="${NGROK_CONFIG:-$NGROK_CONFIG_DEFAULT}"
 CLIPROXY_BIN="${CLIPROXY_BIN:-cliproxyapi}"
 
-# Read port from config.yaml (falls back to 8317 if not found)
+# Script directory (used throughout)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# WebUI defaults
+WEBUI_DIR="${WEBUI_DIR:-$SCRIPT_DIR/../Cli-Proxy-API-Management-Center}"
+WEBUI_PORT="${WEBUI_PORT:-5173}"
+WEBUI_DEV_MODE=false
+
+# Read port from config.yaml (falls back to 8317 if not found)
 CONFIG_FILE="$SCRIPT_DIR/config.yaml"
 if [ -f "$CONFIG_FILE" ]; then
     CONFIG_PORT=$(grep "^port:" "$CONFIG_FILE" 2>/dev/null | awk '{print $2}')
@@ -55,6 +65,9 @@ for arg in "$@"; do
         --no-ngrok)
             USE_NGROK=false
             ;;
+        --webui-dev)
+            WEBUI_DEV_MODE=true
+            ;;
         --stop)
             echo "Stopping CLIProxyAPI on port $PORT..."
             # Kill server process on port
@@ -71,21 +84,40 @@ for arg in "$@"; do
                 echo "$NGROK_PIDS" | xargs kill 2>/dev/null
                 echo "Killed ngrok process(es): $NGROK_PIDS"
             fi
+            # Kill WebUI server on its port
+            echo "Stopping WebUI on port $WEBUI_PORT..."
+            WEBUI_PIDS=$(lsof -ti ":$WEBUI_PORT" 2>/dev/null)
+            if [ -n "$WEBUI_PIDS" ]; then
+                echo "$WEBUI_PIDS" | xargs kill 2>/dev/null
+                echo "Killed WebUI process(es): $WEBUI_PIDS"
+            else
+                echo "No WebUI server found on port $WEBUI_PORT"
+            fi
             exit 0
             ;;
         --help|-h)
-            sed -n '3,19p' "$0" | sed 's/^# //' | sed 's/^#//'
+            sed -n '3,21p' "$0" | sed 's/^# //' | sed 's/^#//'
             exit 0
             ;;
     esac
 done
 
-# Check if port is already in use
+# Check if ports are already in use
 if lsof -i ":$PORT" >/dev/null 2>&1; then
     echo "ERROR: Port $PORT is already in use!"
     echo "Another instance may be running."
     echo ""
     lsof -i ":$PORT"
+    echo ""
+    echo "Run './start.sh --stop' to kill existing processes."
+    exit 1
+fi
+
+if lsof -i ":$WEBUI_PORT" >/dev/null 2>&1; then
+    echo "ERROR: WebUI port $WEBUI_PORT is already in use!"
+    echo "Another instance may be running."
+    echo ""
+    lsof -i ":$WEBUI_PORT"
     echo ""
     echo "Run './start.sh --stop' to kill existing processes."
     exit 1
@@ -102,11 +134,17 @@ echo ""
 # PIDs for cleanup
 CLIPROXY_PID=""
 NGROK_PID=""
+WEBUI_PID=""
 
-# Cleanup function - stops both services
+# Cleanup function - stops all services
 cleanup() {
     echo ""
     echo "Shutting down..."
+
+    if [ -n "$WEBUI_PID" ]; then
+        echo "Stopping WebUI (PID $WEBUI_PID)..."
+        kill "$WEBUI_PID" 2>/dev/null || true
+    fi
 
     if [ -n "$NGROK_PID" ]; then
         echo "Stopping ngrok (PID $NGROK_PID)..."
@@ -194,6 +232,83 @@ if [ "$USE_NGROK" = "true" ] || [ "$USE_NGROK" = "1" ]; then
     check_ngrok
 fi
 
+# Build and start WebUI
+build_webui() {
+    if [ ! -d "$WEBUI_DIR" ]; then
+        echo "ERROR: WebUI directory not found at $WEBUI_DIR"
+        echo "Clone it with: git clone https://github.com/MuhsinunC/Cli-Proxy-API-Management-Center.git"
+        exit 1
+    fi
+
+    echo "=========================================="
+    echo "BUILDING WEBUI..."
+    echo "=========================================="
+    echo ""
+
+    cd "$WEBUI_DIR" || exit 1
+
+    # Install dependencies if node_modules doesn't exist
+    if [ ! -d "node_modules" ]; then
+        echo "Installing WebUI dependencies..."
+        if command -v bun >/dev/null 2>&1; then
+            bun install || { echo "Failed to install WebUI dependencies"; exit 1; }
+        elif command -v npm >/dev/null 2>&1; then
+            npm install || { echo "Failed to install WebUI dependencies"; exit 1; }
+        else
+            echo "ERROR: Neither bun nor npm found. Install one of them."
+            exit 1
+        fi
+    fi
+
+    # Build the WebUI
+    if command -v bun >/dev/null 2>&1; then
+        bun run build || { echo "Failed to build WebUI"; exit 1; }
+    else
+        npm run build || { echo "Failed to build WebUI"; exit 1; }
+    fi
+
+    echo ""
+    echo "WEBUI BUILD SUCCESSFUL!"
+    echo ""
+}
+
+start_webui() {
+    cd "$WEBUI_DIR" || exit 1
+
+    if [ "$WEBUI_DEV_MODE" = true ]; then
+        echo "Starting WebUI in dev mode (hot-reload) on port $WEBUI_PORT..."
+        if command -v bun >/dev/null 2>&1; then
+            ( bun run dev 2>&1 | sed 's/^/[WEBUI] /' ) &
+        else
+            ( npm run dev 2>&1 | sed 's/^/[WEBUI] /' ) &
+        fi
+    else
+        echo "Starting WebUI in preview mode on port $WEBUI_PORT..."
+        if command -v bun >/dev/null 2>&1; then
+            ( bun run preview 2>&1 | sed 's/^/[WEBUI] /' ) &
+        else
+            ( npm run preview 2>&1 | sed 's/^/[WEBUI] /' ) &
+        fi
+    fi
+    WEBUI_PID=$!
+
+    # Wait a moment and check if it started
+    sleep 2
+    if ! kill -0 "$WEBUI_PID" 2>/dev/null; then
+        echo "WARNING: WebUI may have failed to start. Check output above."
+    else
+        echo "WebUI started (PID $WEBUI_PID)"
+    fi
+
+    # Return to script directory
+    cd "$SCRIPT_DIR" || exit 1
+}
+
+# Build WebUI (only if not in dev mode, since dev mode doesn't need pre-build)
+if [ "$WEBUI_DEV_MODE" = false ]; then
+    build_webui
+fi
+
 # Start CLIProxyAPI in background
 if [ "$USE_LOCAL_BUILD" = true ]; then
     echo "=========================================="
@@ -216,6 +331,10 @@ if ! kill -0 "$CLIPROXY_PID" 2>/dev/null; then
     exit 1
 fi
 
+echo ""
+
+# Start WebUI
+start_webui
 echo ""
 
 # Start ngrok if enabled
@@ -248,6 +367,14 @@ if [ "$USE_NGROK" = "true" ] || [ "$USE_NGROK" = "1" ]; then
     echo "  OpenAI-compatible:    $NGROK_URL/v1/chat/completions"
     echo "  Anthropic-compatible: $NGROK_URL/v1/messages"
     echo ""
+    echo "WebUI:"
+    echo "  Local:                http://localhost:$WEBUI_PORT"
+    if [ "$WEBUI_DEV_MODE" = true ]; then
+        echo "  Mode:                 Development (hot-reload enabled)"
+    else
+        echo "  Mode:                 Preview (static build)"
+    fi
+    echo ""
     echo "Cursor Settings:"
     echo "  Base URL: $NGROK_URL/v1"
     echo "  API Key:  (your api-key from config)"
@@ -258,6 +385,14 @@ else
     echo "API Endpoints:"
     echo "  OpenAI-compatible:    http://localhost:$PORT/v1/chat/completions"
     echo "  Anthropic-compatible: http://localhost:$PORT/v1/messages"
+    echo ""
+    echo "WebUI:"
+    echo "  URL:                  http://localhost:$WEBUI_PORT"
+    if [ "$WEBUI_DEV_MODE" = true ]; then
+        echo "  Mode:                 Development (hot-reload enabled)"
+    else
+        echo "  Mode:                 Preview (static build)"
+    fi
     echo ""
     echo "Cursor Settings:"
     echo "  Base URL: http://localhost:$PORT/v1"
