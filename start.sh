@@ -9,6 +9,8 @@
 #   ./start.sh --brew       # Use brew version instead of building from source
 #   ./start.sh --no-ngrok   # Start without ngrok (localhost only)
 #   ./start.sh --webui-dev  # Enable WebUI hot-reload mode (uses vite dev server)
+#   ./start.sh --port=XXXX  # Override API server port (default: 8317 or config.yaml)
+#   ./start.sh --webui-port=XXXX  # Override WebUI port (default: 5173)
 #   ./start.sh --stop       # Stop any running server processes
 #   ./start.sh --brew --no-ngrok  # Brew version, no ngrok
 #
@@ -51,6 +53,7 @@ if [ -f "$CONFIG_FILE" ]; then
     CONFIG_PORT=$(grep "^port:" "$CONFIG_FILE" 2>/dev/null | awk '{print $2}')
 fi
 PORT="${PORT:-${CONFIG_PORT:-8317}}"
+PORT_OVERRIDE=""  # Will be set if --port is used
 
 # Feature flags (can be set via env or command line)
 USE_NGROK="${USE_NGROK:-true}"
@@ -67,6 +70,13 @@ for arg in "$@"; do
             ;;
         --webui-dev)
             WEBUI_DEV_MODE=true
+            ;;
+        --port=*)
+            PORT="${arg#*=}"
+            PORT_OVERRIDE="$PORT"
+            ;;
+        --webui-port=*)
+            WEBUI_PORT="${arg#*=}"
             ;;
         --stop)
             echo "Stopping CLIProxyAPI on port $PORT..."
@@ -154,6 +164,12 @@ cleanup() {
     if [ -n "$CLIPROXY_PID" ]; then
         echo "Stopping CLIProxyAPI (PID $CLIPROXY_PID)..."
         kill "$CLIPROXY_PID" 2>/dev/null || true
+    fi
+
+    # Clean up temporary config file
+    if [ -n "$TEMP_CONFIG" ] && [ -f "$TEMP_CONFIG" ]; then
+        echo "Removing temporary config file..."
+        rm -f "$TEMP_CONFIG"
     fi
 
     echo "Done."
@@ -278,16 +294,16 @@ start_webui() {
     if [ "$WEBUI_DEV_MODE" = true ]; then
         echo "Starting WebUI in dev mode (hot-reload) on port $WEBUI_PORT..."
         if command -v bun >/dev/null 2>&1; then
-            ( bun run dev 2>&1 | sed 's/^/[WEBUI] /' ) &
+            ( bun run dev -- --port "$WEBUI_PORT" 2>&1 | sed 's/^/[WEBUI] /' ) &
         else
-            ( npm run dev 2>&1 | sed 's/^/[WEBUI] /' ) &
+            ( npm run dev -- --port "$WEBUI_PORT" 2>&1 | sed 's/^/[WEBUI] /' ) &
         fi
     else
         echo "Starting WebUI in preview mode on port $WEBUI_PORT..."
         if command -v bun >/dev/null 2>&1; then
-            ( bun run preview 2>&1 | sed 's/^/[WEBUI] /' ) &
+            ( bun run preview -- --port "$WEBUI_PORT" 2>&1 | sed 's/^/[WEBUI] /' ) &
         else
-            ( npm run preview 2>&1 | sed 's/^/[WEBUI] /' ) &
+            ( npm run preview -- --port "$WEBUI_PORT" 2>&1 | sed 's/^/[WEBUI] /' ) &
         fi
     fi
     WEBUI_PID=$!
@@ -309,6 +325,19 @@ if [ "$WEBUI_DEV_MODE" = false ]; then
     build_webui
 fi
 
+# Handle port override by creating a temporary config file
+TEMP_CONFIG=""
+if [ -n "$PORT_OVERRIDE" ]; then
+    TEMP_CONFIG="$SCRIPT_DIR/.config-dev-$PORT.yaml"
+    echo "Creating temporary config with port $PORT..."
+    # Copy the original config and override the port
+    if [ -f "$CONFIG_FILE" ]; then
+        sed "s/^port:.*/port: $PORT/" "$CONFIG_FILE" > "$TEMP_CONFIG"
+    else
+        echo "port: $PORT" > "$TEMP_CONFIG"
+    fi
+fi
+
 # Start CLIProxyAPI in background
 if [ "$USE_LOCAL_BUILD" = true ]; then
     echo "=========================================="
@@ -318,7 +347,11 @@ else
     echo "Starting CLIProxyAPI (brew version) on port $PORT..."
 fi
 
-"$CLIPROXY_BIN" &
+if [ -n "$TEMP_CONFIG" ]; then
+    "$CLIPROXY_BIN" -config "$TEMP_CONFIG" &
+else
+    "$CLIPROXY_BIN" &
+fi
 CLIPROXY_PID=$!
 echo "CLIProxyAPI started (PID $CLIPROXY_PID)"
 
