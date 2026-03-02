@@ -252,7 +252,7 @@ func (e *PerplexityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Aut
 }
 
 // ExecuteStream performs a streaming chat completion request.
-func (e *PerplexityExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+func (e *PerplexityExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	sessionToken := perplexityCreds(auth)
 	if sessionToken == "" {
 		err = fmt.Errorf("perplexity executor: missing session token")
@@ -317,7 +317,7 @@ func (e *PerplexityExecutor) ExecuteStream(ctx context.Context, auth *cliproxyau
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
-	stream = out
+	stream := (<-chan cliproxyexecutor.StreamChunk)(out)
 	go func() {
 		defer close(out)
 		defer func() {
@@ -383,7 +383,7 @@ func (e *PerplexityExecutor) ExecuteStream(ctx context.Context, auth *cliproxyau
 		reporter.ensurePublished(ctx)
 	}()
 
-	return stream, nil
+	return &cliproxyexecutor.StreamResult{Chunks: stream}, nil
 }
 
 // CountTokens estimates token count.
