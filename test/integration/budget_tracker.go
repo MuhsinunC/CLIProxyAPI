@@ -68,8 +68,8 @@ func (bt *BudgetTracker) loadPricing() {
 		// Google models
 		"gemini-2.0-flash":       {PromptPerM: 0.10, CompletionPerM: 0.40},
 		"gemini-1.5-pro":         {PromptPerM: 1.25, CompletionPerM: 5.0},
-		"gemini-2.0-flash-lite":  {PromptPerM: 0.075, CompletionPerM: 0.30},
-		"gemini-2.5-flash-preview": {PromptPerM: 0.15, CompletionPerM: 0.60},
+		"gemini-2.5-flash-lite":    {PromptPerM: 0.075, CompletionPerM: 0.30},
+		"gemini-3-flash-preview":   {PromptPerM: 0.15, CompletionPerM: 0.60},
 	}
 }
 

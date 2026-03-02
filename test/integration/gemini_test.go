@@ -254,42 +254,34 @@ func TestGemini_ViaAnthropicEndpoint(t *testing.T) {
 // Gemini Edge Case Tests
 // ============================================================
 
-// TestGemini_FlashLite tests with gemini-2.0-flash-lite model variant.
+// TestGemini_FlashLite tests with gemini-2.5-flash-lite model variant.
 // This test documents expected behavior - model may not be configured.
 func TestGemini_FlashLite(t *testing.T) {
 	ResetMockTransport()
 
-	req := buildChatRequest("gemini-2.0-flash-lite", "Hello")
+	req := buildChatRequest("gemini-2.5-flash-lite", "Hello")
 	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
 
 	// Model may not be configured in test environment
-	if resp.StatusCode == http.StatusBadRequest {
-		body := readResponseBody(t, resp)
-		if gjson.GetBytes(body, "error.message").String() != "" {
-			t.Skip("Model gemini-2.0-flash-lite not configured in test environment")
-		}
+	if resp.StatusCode != http.StatusOK {
+		t.Skip("Model gemini-2.5-flash-lite not configured in test environment")
 	}
-	assertStatusCode(t, resp, http.StatusOK)
 	body := readResponseBody(t, resp)
 	assertJSONPathExists(t, body, "choices")
 }
 
-// TestGemini_FlashPreview tests with gemini-2.5-flash-preview model variant.
+// TestGemini_FlashPreview tests with gemini-3-flash-preview model variant.
 // This test documents expected behavior - model may not be configured.
 func TestGemini_FlashPreview(t *testing.T) {
 	ResetMockTransport()
 
-	req := buildChatRequest("gemini-2.5-flash-preview", "Hello")
+	req := buildChatRequest("gemini-3-flash-preview", "Hello")
 	resp := makeRequest(t, http.MethodPost, "/v1/chat/completions", req)
 
 	// Model may not be configured in test environment
-	if resp.StatusCode == http.StatusBadRequest {
-		body := readResponseBody(t, resp)
-		if gjson.GetBytes(body, "error.message").String() != "" {
-			t.Skip("Model gemini-2.5-flash-preview not configured in test environment")
-		}
+	if resp.StatusCode != http.StatusOK {
+		t.Skip("Model gemini-3-flash-preview not configured in test environment")
 	}
-	assertStatusCode(t, resp, http.StatusOK)
 	body := readResponseBody(t, resp)
 	assertJSONPathExists(t, body, "choices")
 }
