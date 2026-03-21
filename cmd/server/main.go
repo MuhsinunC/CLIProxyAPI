@@ -437,8 +437,9 @@ func main() {
 	}
 
 	// Initialize persistent signature cache if configured
-	if cfg.SignatureCachePath != "" {
-		if err := cache.InitSignatureStore(cfg.SignatureCachePath); err != nil {
+	if cfg.SignatureCachePersistence {
+		cachePath := filepath.Join(filepath.Dir(configFilePath), "signature_cache")
+		if err := cache.InitSignatureStore(cachePath); err != nil {
 			log.Warnf("Failed to initialize signature cache store: %v", err)
 		}
 		defer cache.CloseSignatureStore()
