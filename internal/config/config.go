@@ -125,6 +125,10 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// SignatureCachePath is the directory path for persistent signature cache storage (BadgerDB).
+	// When set, thinking signatures survive server restarts. Leave empty to disable.
+	SignatureCachePath string `yaml:"signature-cache-path" json:"signature-cache-path"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 

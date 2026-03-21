@@ -17,6 +17,7 @@ refs/*
 pgstore/*
 gitstore/*
 objectstore/*
+signature_cache_badger/
 
 # Static assets
 static/*

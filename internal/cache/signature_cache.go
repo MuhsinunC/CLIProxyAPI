@@ -113,10 +113,16 @@ func CacheSignature(modelName, text, signature string) {
 		Signature: signature,
 		Timestamp: time.Now(),
 	}
+
+	// Persist to disk asynchronously
+	if storeInitialized {
+		storePut(groupKey, textHash, signature)
+	}
 }
 
 // GetCachedSignature retrieves a cached signature for a given model group and text.
 // Returns empty string if not found or expired.
+// Falls back to persistent disk store (BadgerDB) on in-memory miss.
 func GetCachedSignature(modelName, text string) string {
 	groupKey := GetModelGroup(modelName)
 
@@ -126,8 +132,15 @@ func GetCachedSignature(modelName, text string) string {
 		}
 		return ""
 	}
+
+	textHash := hashText(text)
+
 	val, ok := signatureCache.Load(groupKey)
 	if !ok {
+		// Group-level miss — try disk
+		if sig := storeGetAndPromote(groupKey, textHash); sig != "" {
+			return sig
+		}
 		if groupKey == "gemini" {
 			return "skip_thought_signature_validator"
 		}
@@ -135,14 +148,16 @@ func GetCachedSignature(modelName, text string) string {
 	}
 	sc := val.(*groupCache)
 
-	textHash := hashText(text)
-
 	now := time.Now()
 
 	sc.mu.Lock()
 	entry, exists := sc.entries[textHash]
 	if !exists {
 		sc.mu.Unlock()
+		// Entry-level miss — try disk
+		if sig := storeGetAndPromote(groupKey, textHash); sig != "" {
+			return sig
+		}
 		if groupKey == "gemini" {
 			return "skip_thought_signature_validator"
 		}
@@ -151,6 +166,10 @@ func GetCachedSignature(modelName, text string) string {
 	if now.Sub(entry.Timestamp) > SignatureCacheTTL {
 		delete(sc.entries, textHash)
 		sc.mu.Unlock()
+		// TTL expiry — try disk (disk has no TTL)
+		if sig := storeGetAndPromote(groupKey, textHash); sig != "" {
+			return sig
+		}
 		if groupKey == "gemini" {
 			return "skip_thought_signature_validator"
 		}
@@ -172,10 +191,15 @@ func ClearSignatureCache(modelName string) {
 			signatureCache.Delete(key)
 			return true
 		})
-		return
+	} else {
+		groupKey := GetModelGroup(modelName)
+		signatureCache.Delete(groupKey)
 	}
-	groupKey := GetModelGroup(modelName)
-	signatureCache.Delete(groupKey)
+
+	// Clear disk entries
+	if storeInitialized {
+		storeClear(modelName)
+	}
 }
 
 // HasValidSignature checks if a signature is valid (non-empty and long enough)

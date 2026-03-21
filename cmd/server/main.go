@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cmd"
@@ -434,6 +435,15 @@ func main() {
 	} else {
 		cfg.AuthDir = resolvedAuthDir
 	}
+
+	// Initialize persistent signature cache if configured
+	if cfg.SignatureCachePath != "" {
+		if err := cache.InitSignatureStore(cfg.SignatureCachePath); err != nil {
+			log.Warnf("Failed to initialize signature cache store: %v", err)
+		}
+		defer cache.CloseSignatureStore()
+	}
+
 	managementasset.SetCurrentConfig(cfg)
 
 	// Create login options to be used in authentication flows.
