@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -16,8 +17,9 @@ var (
 	signatureStore   *badger.DB
 	storeWriteChan   chan storeEntry
 	storeDoneChan    chan struct{}
+	storeWG          sync.WaitGroup
 	storeInitOnce    sync.Once
-	storeInitialized bool
+	storeInitialized atomic.Bool
 )
 
 // storeEntry represents a signature entry to be written to BadgerDB.
@@ -63,27 +65,27 @@ func InitSignatureStore(path string) error {
 			log.Infof("[SIGNATURE-STORE] Loaded %d signatures from disk", loaded)
 		}
 
-		go asyncStoreWriter()
-		go runStoreGC()
+		storeWG.Add(2)
+		go func() { defer storeWG.Done(); asyncStoreWriter() }()
+		go func() { defer storeWG.Done(); runStoreGC() }()
 
-		storeInitialized = true
+		storeInitialized.Store(true)
 		log.Infof("[SIGNATURE-STORE] Initialized at %s", path)
 	})
 	return initErr
 }
 
 // CloseSignatureStore gracefully shuts down the persistent store.
-// Drains pending writes, stops background goroutines, and closes BadgerDB.
+// Drains pending writes, waits for background goroutines, and closes BadgerDB.
 func CloseSignatureStore() {
-	if !storeInitialized || signatureStore == nil {
+	if !storeInitialized.Load() || signatureStore == nil {
 		return
 	}
-	storeInitialized = false
+	storeInitialized.Store(false)
 
+	// Signal background goroutines to stop and wait for them to finish
 	close(storeDoneChan)
-
-	// Give the writer a moment to drain
-	time.Sleep(100 * time.Millisecond)
+	storeWG.Wait()
 
 	if err := signatureStore.Close(); err != nil {
 		log.Warnf("[SIGNATURE-STORE] Error closing: %v", err)
@@ -210,7 +212,7 @@ func storeLoadAll() int {
 // storeGetAndPromote checks BadgerDB for a signature and promotes it
 // to the in-memory sync.Map on hit.
 func storeGetAndPromote(groupKey, textHash string) string {
-	if !storeInitialized {
+	if !storeInitialized.Load() {
 		return ""
 	}
 	sig, ok := storeGet(groupKey, textHash)
@@ -266,10 +268,10 @@ func runStoreGC() {
 	for {
 		select {
 		case <-ticker.C:
+			if signatureStore == nil {
+				return
+			}
 			for {
-				if signatureStore == nil {
-					return
-				}
 				err := signatureStore.RunValueLogGC(0.5)
 				if err != nil {
 					break

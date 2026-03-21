@@ -11,14 +11,15 @@ import (
 
 // resetStore clears the store singleton state for test isolation.
 func resetStore() {
-	if storeInitialized {
+	if storeInitialized.Load() {
 		CloseSignatureStore()
 	}
 	signatureStore = nil
 	storeWriteChan = nil
 	storeDoneChan = nil
 	storeInitOnce = sync.Once{}
-	storeInitialized = false
+	storeWG = sync.WaitGroup{}
+	storeInitialized.Store(false)
 	ClearSignatureCache("")
 }
 
@@ -31,7 +32,7 @@ func TestInitSignatureStore_CreatesAndOpens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitSignatureStore failed: %v", err)
 	}
-	if !storeInitialized {
+	if !storeInitialized.Load() {
 		t.Fatal("storeInitialized should be true")
 	}
 	if signatureStore == nil {
@@ -47,7 +48,7 @@ func TestInitSignatureStore_EmptyPath_Disabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitSignatureStore with empty path should succeed: %v", err)
 	}
-	if storeInitialized {
+	if storeInitialized.Load() {
 		t.Fatal("storeInitialized should be false for empty path")
 	}
 }

@@ -107,15 +107,14 @@ func CacheSignature(modelName, text, signature string) {
 	textHash := hashText(text)
 	sc := getOrCreateGroupCache(groupKey)
 	sc.mu.Lock()
-	defer sc.mu.Unlock()
-
 	sc.entries[textHash] = SignatureEntry{
 		Signature: signature,
 		Timestamp: time.Now(),
 	}
+	sc.mu.Unlock()
 
-	// Persist to disk asynchronously
-	if storeInitialized {
+	// Persist to disk asynchronously (outside lock — storePut is non-blocking)
+	if storeInitialized.Load() {
 		storePut(groupKey, textHash, signature)
 	}
 }
@@ -197,7 +196,7 @@ func ClearSignatureCache(modelName string) {
 	}
 
 	// Clear disk entries
-	if storeInitialized {
+	if storeInitialized.Load() {
 		storeClear(modelName)
 	}
 }
