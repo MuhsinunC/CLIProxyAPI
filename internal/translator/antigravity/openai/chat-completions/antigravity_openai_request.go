@@ -126,6 +126,19 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						}
 					}
 				}
+				// Also check Claude-format: content array with type: "tool_use"
+				content := m.Get("content")
+				if content.IsArray() {
+					for _, item := range content.Array() {
+						if item.Get("type").String() == "tool_use" {
+							id := item.Get("id").String()
+							name := item.Get("name").String()
+							if id != "" && name != "" {
+								tcID2Name[id] = name
+							}
+						}
+					}
+				}
 			}
 		}
 
@@ -239,6 +252,25 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", audioData)
 								p++
 							}
+						case "tool_result":
+							// Claude-format tool result: {type: "tool_result", tool_use_id: "...", content: "..."}
+							toolUseID := item.Get("tool_use_id").String()
+							resultContent := item.Get("content")
+							if toolUseID != "" {
+								funcName := tcID2Name[toolUseID]
+								if funcName == "" {
+									funcName = "unknown"
+								}
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionResponse.id", toolUseID)
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionResponse.name", funcName)
+								if resultContent.Type == gjson.String {
+									node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionResponse.response", []byte(`{"result":`+resultContent.Raw+`}`))
+								} else if resultContent.IsArray() || resultContent.IsObject() {
+									node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionResponse.response", []byte(resultContent.Raw))
+								}
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature)
+								p++
+							}
 						}
 					}
 				}
@@ -272,6 +304,20 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature)
 									p++
 								}
+							}
+						case "tool_use":
+							// Claude-format tool_use in assistant content array -> functionCall
+							tuID := item.Get("id").String()
+							tuName := item.Get("name").String()
+							tuInput := item.Get("input")
+							if tuID != "" && tuName != "" {
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.id", tuID)
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.name", tuName)
+								if tuInput.Exists() {
+									node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionCall.args", []byte(tuInput.Raw))
+								}
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature)
+								p++
 							}
 						}
 					}
