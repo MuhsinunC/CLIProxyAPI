@@ -155,6 +155,9 @@ type Server struct {
 	wsAuthChanged func(bool, bool)
 	wsAuthEnabled atomic.Bool
 
+	// lastUpdateMsg deduplicates repeated UpdateClients log messages
+	lastUpdateMsg string
+
 	// management handler
 	mgmt *managementHandlers.Handler
 
@@ -1002,7 +1005,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	}
 
 	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + openAICompatCount
-	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d OpenAI-compat)\n",
+	msg := fmt.Sprintf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d OpenAI-compat)",
 		total,
 		authEntries,
 		geminiAPIKeyCount,
@@ -1011,6 +1014,10 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		vertexAICompatCount,
 		openAICompatCount,
 	)
+	if msg != s.lastUpdateMsg {
+		fmt.Println(msg)
+		s.lastUpdateMsg = msg
+	}
 }
 
 func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
